@@ -1,0 +1,436 @@
+{
+  "name": "adway-checker-vscode",
+  "displayName": "Adway Checker",
+  "description": "Проверка лендингов на соответствие требованиям Adway",
+  "version": "1.0.0",
+  "publisher": "adway",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Linters",
+    "Snippets",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:html",
+    "onCommand:adway.initProjectStructure"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "adway.checkLanding",
+        "title": "Adway: Проверить лендинг",
+        "icon": "$(search)"
+      },
+      {
+        "command": "adway.insertJquery",
+        "title": "Adway: Вставить jQuery",
+        "icon": "$(code)"
+      },
+      {
+        "command": "adway.insertScripts",
+        "title": "Adway: Вставить обязательные скрипты",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "adway.insertHiddenInputs",
+        "title": "Adway: Вставить скрытые инпуты",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "adway.insertForm",
+        "title": "Adway: Вставить форму",
+        "icon": "$(list-ordered)"
+      },
+      {
+        "command": "adway.insertDate",
+        "title": "Adway: Вставить дату",
+        "icon": "$(calendar)"
+      },
+      {
+        "command": "adway.insertVideoScript",
+        "title": "Adway: Вставить HLS видео скрипт",
+        "icon": "$(device-camera-video)"
+      },
+      {
+        "command": "adway.openSnippets",
+        "title": "Adway: Открыть все сниппеты",
+        "icon": "$(menu)"
+      },
+      {
+        "command": "adway.refreshSheets",
+        "title": "Adway: Обновить кэш SID/Country",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "adway.initProjectStructure",
+        "title": "Adway: Создать структуру проекта",
+        "icon": "$(folder-library)"
+      },
+      {
+        "command": "adway.normalizeHrefs",
+        "title": "Adway: Заменить все href на \"#\"",
+        "icon": "$(link)"
+      },
+      {
+        "command": "adway.cleanupLanding",
+        "title": "Adway: Почистить лендинг",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "adway.focusResultsTree",
+        "title": "Adway: Показать панель результатов",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "adway.fixOrderForm",
+        "title": "Adway: Починить форму заказа",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "adway.fixLocalPath",
+        "title": "Adway: Исправить путь (images/css/js)",
+        "icon": "$(file-symlink-file)"
+      },
+      {
+        "command": "adway.fixAllLocalPaths",
+        "title": "Adway: Исправить все пути на images/css/js",
+        "icon": "$(replace-all)"
+      },
+      {
+        "command": "adway.insertDoctype",
+        "title": "Adway: Вставить <!DOCTYPE html>",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "adway.removeBase",
+        "title": "Adway: Удалить тег <base>",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "adway.removeTarget",
+        "title": "Adway: Удалить все target",
+        "icon": "$(close)"
+      },
+      {
+        "command": "adway.flattenPicture",
+        "title": "Adway: Убрать <source> из <picture>",
+        "icon": "$(file-media)"
+      },
+      {
+        "command": "adway.insertLazy",
+        "title": "Adway: Вставить lazy loading",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "adway.insertScroll",
+        "title": "Adway: Вставить скрипт прокрутки",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "adway.insertValidation",
+        "title": "Adway: Вставить валидаторы",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "adway.fixValidationName",
+        "title": "Adway: Заменить старый валидатор имени",
+        "icon": "$(replace)"
+      },
+      {
+        "command": "adway.addOneform",
+        "title": "Adway: Добавить id=\"oneform\"",
+        "icon": "$(symbol-key)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "adway",
+          "title": "Adway",
+          "icon": "$(checklist)"
+        }
+      ]
+    },
+    "views": {
+      "adway": [
+        {
+          "id": "adwayResults",
+          "name": "Результаты"
+        }
+      ]
+    },
+    "snippets": [
+      {
+        "language": "html",
+        "path": "./snippets/adway.json"
+      }
+    ],
+    "configuration": {
+      "title": "Adway Checker",
+      "properties": {
+        "adway.linkWhitelist": {
+          "type": "array",
+          "default": [
+            "static.joxi.pro",
+            "static.cloudflareinsights.com",
+            "cloudflareinsights.com",
+            "github.com",
+            "www.w3.org",
+            "converteai.net",
+            "vturb.com"
+          ],
+          "description": "Список разрешённых внешних доменов"
+        },
+        "adway.enableDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Включить автоматическую диагностику HTML файлов"
+        },
+        "adway.diagnosticsDebounceMs": {
+          "type": "number",
+          "default": 400,
+          "minimum": 0,
+          "description": "Задержка (мс) перед автопроверкой после ввода. 0 = без задержки"
+        },
+        "adway.sheetsEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Проверять SID/Country по Google Sheets (нужен доступ Anyone with the link → Viewer или Publish to web)"
+        },
+        "adway.sheetsUrl": {
+          "type": "string",
+          "default": "https://docs.google.com/spreadsheets/d/1c0SNeKpeZF4osjHEd2_x5EnVSV3eA_mTXOypwMWQSFY/export?format=csv&gid=1768774196",
+          "description": "URL таблицы (edit или export?format=csv). Edit-ссылка автоматически конвертируется в CSV."
+        },
+        "adway.sheetsSidColumn": {
+          "type": "string",
+          "default": "C",
+          "description": "Колонка SID (если в CSV нет заголовка sid)"
+        },
+        "adway.sheetsCountryColumn": {
+          "type": "string",
+          "default": "B",
+          "description": "Колонка Country (если в CSV нет заголовка country)"
+        },
+        "adway.sheetsCacheTtlMs": {
+          "type": "number",
+          "default": 60000,
+          "description": "TTL кэша таблицы в миллисекундах"
+        },
+        "adway.sheetsTimeoutMs": {
+          "type": "number",
+          "default": 8000,
+          "description": "Таймаут загрузки CSV в миллисекундах"
+        },
+        "adway.checkLocalPaths": {
+          "type": "boolean",
+          "default": true,
+          "description": "Проверять, что локальные файлы из src/href/srcset существуют на диске"
+        },
+        "adway.cleanup.removePictureSource": {
+          "type": "boolean",
+          "default": true,
+          "description": "В cleanup и диагностике: убирать/предупреждать о <source> внутри <picture>"
+        },
+        "adway.checkUnusedScripts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Предупреждать о пустых, дублирующихся и возможно неиспользуемых функциях в <script>"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "adway.checkLanding",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a",
+        "when": "editorLangId == html"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "adway.initProjectStructure",
+          "group": "adway@1",
+          "when": "explorerResourceIsFolder"
+        }
+      ],
+      "editor/context": [
+        {
+          "when": "editorLangId == html",
+          "command": "adway.checkLanding",
+          "group": "adway@1"
+        },
+        {
+          "when": "editorLangId == html",
+          "command": "adway.cleanupLanding",
+          "group": "adway@2"
+        },
+        {
+          "when": "editorLangId == html",
+          "submenu": "adway.fixMenu",
+          "group": "adway@3"
+        },
+        {
+          "when": "editorLangId == html",
+          "submenu": "adway.insertMenu",
+          "group": "adway@4"
+        },
+        {
+          "when": "editorLangId == html",
+          "command": "adway.openSnippets",
+          "group": "adway@5"
+        },
+        {
+          "when": "editorLangId == html",
+          "command": "adway.initProjectStructure",
+          "group": "adway@6"
+        }
+      ],
+      "adway.fixMenu": [
+        {
+          "command": "adway.fixOrderForm",
+          "group": "1_form@1"
+        },
+        {
+          "command": "adway.addOneform",
+          "group": "1_form@2"
+        },
+        {
+          "command": "adway.normalizeHrefs",
+          "group": "2_links@1"
+        },
+        {
+          "command": "adway.removeTarget",
+          "group": "2_links@2"
+        },
+        {
+          "command": "adway.fixLocalPath",
+          "group": "2_links@3"
+        },
+        {
+          "command": "adway.fixAllLocalPaths",
+          "group": "2_links@4"
+        },
+        {
+          "command": "adway.flattenPicture",
+          "group": "3_markup@1"
+        },
+        {
+          "command": "adway.removeBase",
+          "group": "3_markup@2"
+        },
+        {
+          "command": "adway.insertDoctype",
+          "group": "3_markup@3"
+        },
+        {
+          "command": "adway.fixValidationName",
+          "group": "4_scripts@1"
+        },
+        {
+          "command": "adway.insertLazy",
+          "group": "4_scripts@2"
+        },
+        {
+          "command": "adway.insertScroll",
+          "group": "4_scripts@3"
+        },
+        {
+          "command": "adway.insertValidation",
+          "group": "4_scripts@4"
+        }
+      ],
+      "adway.insertMenu": [
+        {
+          "command": "adway.insertJquery",
+          "group": "1_basic@1"
+        },
+        {
+          "command": "adway.insertScripts",
+          "group": "1_basic@2"
+        },
+        {
+          "command": "adway.insertLazy",
+          "group": "1_basic@3"
+        },
+        {
+          "command": "adway.insertScroll",
+          "group": "1_basic@4"
+        },
+        {
+          "command": "adway.insertValidation",
+          "group": "1_basic@5"
+        },
+        {
+          "command": "adway.insertHiddenInputs",
+          "group": "2_form@1"
+        },
+        {
+          "command": "adway.insertForm",
+          "group": "2_form@2"
+        },
+        {
+          "command": "adway.insertDoctype",
+          "group": "2_form@3"
+        },
+        {
+          "command": "adway.insertDate",
+          "group": "3_other@1"
+        },
+        {
+          "command": "adway.insertVideoScript",
+          "group": "3_other@2"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "adway.fixMenu",
+        "label": "Adway: Исправления"
+      },
+      {
+        "id": "adway.insertMenu",
+        "label": "Adway: Вставить код"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "jsdom": "^22.0.0"
+  },
+  "author": "Danila Schetinkin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DanilaSchetinkin/adway-checker-vscode"
+  },
+  "keywords": [
+    "adway",
+    "landing",
+    "checker",
+    "html",
+    "validation",
+    "linter"
+  ]
+}
