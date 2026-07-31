@@ -85,6 +85,11 @@
         "icon": "$(list-tree)"
       },
       {
+        "command": "adway.resultsShowFixesContext",
+        "title": "Исправить…",
+        "icon": "$(lightbulb)"
+      },
+      {
         "command": "adway.fixOrderForm",
         "title": "Adway: Починить форму заказа",
         "icon": "$(tools)"
@@ -143,6 +148,21 @@
         "command": "adway.addOneform",
         "title": "Adway: Добавить id=\"oneform\"",
         "icon": "$(symbol-key)"
+      },
+      {
+        "command": "adway.removeComments",
+        "title": "Adway: Удалить HTML-комментарии",
+        "icon": "$(commentary)"
+      },
+      {
+        "command": "adway.downloadExternalImages",
+        "title": "Adway: Скачать внешние изображения",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "adway.openExternalImages",
+        "title": "Adway: Открыть внешние изображения в браузере",
+        "icon": "$(link-external)"
       }
     ],
     "viewsContainers": {
@@ -248,9 +268,167 @@
         "key": "ctrl+alt+a",
         "mac": "cmd+alt+a",
         "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.cleanupLanding",
+        "key": "ctrl+alt+c",
+        "mac": "cmd+alt+c",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.fixOrderForm",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.fixAllLocalPaths",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.normalizeHrefs",
+        "key": "ctrl+alt+h",
+        "mac": "cmd+alt+h",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.focusResultsTree",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.insertLazy",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.insertValidation",
+        "key": "ctrl+alt+v",
+        "mac": "cmd+alt+v",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.insertScripts",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.removeComments",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.downloadExternalImages",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d",
+        "when": "editorLangId == html"
+      },
+      {
+        "command": "adway.openExternalImages",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "editorLangId == html"
       }
     ],
     "menus": {
+      "webview/context": [
+        {
+          "command": "adway.resultsShowFixesContext",
+          "when": "webviewId == 'adwayResults' && webviewSection == 'adwayResult' && adwayCanFix",
+          "group": "adway@1"
+        },
+        {
+          "command": "adway.insertJquery",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.jquery'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.insertLazy",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.lazy'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.insertScroll",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.scroll'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.addOneform",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.oneform' || adwayFixCode == 'adway.scroll')",
+          "group": "adway_fix@2"
+        },
+        {
+          "command": "adway.insertValidation",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.validation.missing' || adwayFixCode == 'adway.validation.old')",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.fixValidationName",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.validation.old'",
+          "group": "adway_fix@2"
+        },
+        {
+          "command": "adway.fixOrderForm",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.action' || adwayFixCode == 'adway.forms' || adwayFixCode == 'adway.method' || adwayFixCode == 'adway.hidden' || adwayFixCode == 'adway.required.name' || adwayFixCode == 'adway.required.phone' || adwayFixCode == 'adway.target')",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.insertHiddenInputs",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.hidden' || adwayFixCode == 'adway.forms')",
+          "group": "adway_fix@2"
+        },
+        {
+          "command": "adway.insertDoctype",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.doctype'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.removeBase",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.base'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.normalizeHrefs",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.href'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.removeTarget",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.target'",
+          "group": "adway_fix@2"
+        },
+        {
+          "command": "adway.flattenPicture",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.picture'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.fixLocalPath",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.localPath'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.fixAllLocalPaths",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.localPath'",
+          "group": "adway_fix@2"
+        },
+        {
+          "command": "adway.downloadExternalImages",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.externalImage'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.openExternalImages",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.externalImage'",
+          "group": "adway_fix@2"
+        }
+      ],
       "explorer/context": [
         {
           "command": "adway.initProjectStructure",
@@ -326,6 +504,18 @@
         {
           "command": "adway.insertDoctype",
           "group": "3_markup@3"
+        },
+        {
+          "command": "adway.removeComments",
+          "group": "3_markup@4"
+        },
+        {
+          "command": "adway.downloadExternalImages",
+          "group": "3_markup@5"
+        },
+        {
+          "command": "adway.openExternalImages",
+          "group": "3_markup@6"
         },
         {
           "command": "adway.fixValidationName",

@@ -1,7 +1,7 @@
 /**
  * Заменяет href у <a> на "#".
  * Не трогает: <link>, {offer}, уже "#", tel:/mailto:.
- * javascript:void(0) и подобные — заменяются на "#".
+ * javascript:… (в т.ч. с кавычками внутри) — заменяется на "#".
  */
 
 const PRESERVE_PREFIXES = ['tel:', 'mailto:'];
@@ -19,13 +19,15 @@ export type NormalizeHrefsResult = {
 };
 
 /**
- * Только теги <a … href="…">. <link rel="stylesheet" href="…"> и прочие не затрагиваются.
+ * Только теги <a … href="…">.
+ * Кавычки в значении (javascript:…('…')) обрабатываются корректно.
  */
 export function normalizeAnchorHrefs(html: string): NormalizeHrefsResult {
     let replaced = 0;
 
+    // (?!\2).)* — всё до закрывающей кавычки того же типа (не [^"']*)
     const next = html.replace(
-        /<a\b([^>]*?)\bhref\s*=\s*(["'])([^"']*)\2([^>]*)>/gi,
+        /<a\b([^>]*?)\bhref\s*=\s*(["'])((?:(?!\2)[\s\S])*)\2([^>]*)>/gi,
         (full, before: string, quote: string, href: string, after: string) => {
             if (shouldPreserveHref(href)) {
                 return full;

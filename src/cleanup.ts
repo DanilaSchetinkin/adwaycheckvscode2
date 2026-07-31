@@ -1,5 +1,5 @@
 /**
- * Cleanup лендинга: target, picture→img, normalize href.
+ * Cleanup лендинга: target, picture→img, normalize href, комментарии.
  */
 
 import { normalizeAnchorHrefs } from './normalizeHrefs';
@@ -8,6 +8,7 @@ export type CleanupOptions = {
     removeTarget?: boolean;
     removePictureSource?: boolean;
     normalizeHrefs?: boolean;
+    removeComments?: boolean;
 };
 
 export type CleanupResult = {
@@ -15,6 +16,7 @@ export type CleanupResult = {
     removedTargets: number;
     flattenedPictures: number;
     replacedHrefs: number;
+    removedComments: number;
 };
 
 /** Удаляет атрибут target="…" / target='…' со всех тегов. */
@@ -47,17 +49,42 @@ export function flattenPictureSources(html: string): { html: string; flattened: 
     return { html: next, flattened };
 }
 
+/**
+ * Удаляет HTML-комментарии <!-- … --> (в т.ч. закомментированные блоки кода).
+ * Не трогает содержимое строк внутри <script>/<style> как JS/CSS — только разметку <!-- -->.
+ */
+export function removeHtmlComments(html: string): { html: string; removed: number } {
+    let removed = 0;
+    let next = html.replace(/<!--[\s\S]*?-->/g, () => {
+        removed += 1;
+        return '';
+    });
+    if (removed > 0) {
+        // убрать лишние пустые строки после вырезания
+        next = next.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+    }
+    return { html: next, removed };
+}
+
 export function cleanupLanding(html: string, options: CleanupOptions = {}): CleanupResult {
     const {
         removeTarget = true,
         removePictureSource = true,
-        normalizeHrefs = true
+        normalizeHrefs = true,
+        removeComments = false
     } = options;
 
     let current = html;
     let removedTargets = 0;
     let flattenedPictures = 0;
     let replacedHrefs = 0;
+    let removedComments = 0;
+
+    if (removeComments) {
+        const r = removeHtmlComments(current);
+        current = r.html;
+        removedComments = r.removed;
+    }
 
     if (removeTarget) {
         const r = removeTargetAttributes(current);
@@ -77,5 +104,11 @@ export function cleanupLanding(html: string, options: CleanupOptions = {}): Clea
         replacedHrefs = r.replaced;
     }
 
-    return { html: current, removedTargets, flattenedPictures, replacedHrefs };
+    return {
+        html: current,
+        removedTargets,
+        flattenedPictures,
+        replacedHrefs,
+        removedComments
+    };
 }

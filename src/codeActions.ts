@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { findFormRanges } from './checker';
-import { cleanupLanding, flattenPictureSources, removeTargetAttributes } from './cleanup';
+import { cleanupLanding, flattenPictureSources, removeHtmlComments, removeTargetAttributes } from './cleanup';
 import { AdwayDiagnosticCodes } from './diagnostics';
 import { findMissingLocalPaths } from './filePaths';
 import { normalizeAnchorHrefs } from './normalizeHrefs';
@@ -36,7 +36,8 @@ export type FixId =
     | 'removeTarget'
     | 'flattenPicture'
     | 'cleanupLanding'
-    | 'fixLocalPath';
+    | 'fixLocalPath'
+    | 'removeComments';
 
 const REQUIRED_HIDDEN: Array<{ name: string; snippet: string }> = [
     { name: 'fbpx', snippet: '<input type="hidden" name="fbpx" value="{fbpx}">' },
@@ -551,12 +552,20 @@ export function buildFixEdit(
             }
             return replaceFullDocument(document, next);
         }
+        case 'removeComments': {
+            const { html: next, removed } = removeHtmlComments(document.getText());
+            if (removed === 0) {
+                return null;
+            }
+            return replaceFullDocument(document, next);
+        }
         case 'cleanupLanding': {
             const config = vscode.workspace.getConfiguration('adway');
             const result = cleanupLanding(document.getText(), {
                 removeTarget: true,
                 removePictureSource: config.get<boolean>('cleanup.removePictureSource', true),
-                normalizeHrefs: true
+                normalizeHrefs: true,
+                removeComments: false
             });
             if (
                 result.removedTargets === 0 &&
@@ -730,6 +739,24 @@ export class AdwayCodeActionProvider implements vscode.CodeActionProvider {
                         'fixLocalPath'
                     ));
                     break;
+                case AdwayDiagnosticCodes.externalImage: {
+                    const action = new vscode.CodeAction(
+                        'Adway: Скачать это изображение в images/',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    action.diagnostics = [diagnostic];
+                    action.isPreferred = true;
+                    action.command = {
+                        command: 'adway.downloadExternalImages',
+                        title: 'Скачать изображение',
+                        arguments: [
+                            document.uri.toString(),
+                            { line: diagnostic.range.start.line }
+                        ]
+                    };
+                    actions.push(action);
+                    break;
+                }
             }
 
             // Fallback: по тексту, если code не распознан

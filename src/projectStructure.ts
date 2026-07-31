@@ -28,20 +28,17 @@ const INDEX_HTML_TEMPLATE = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Landing</title>
-  <link rel="stylesheet" href="css/style.css">
+  <!-- <link rel="stylesheet" href="css/style.css"> -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js" referrerpolicy="no-referrer"></script>
 </head>
 <body>
   <div id="oneform">
     <!-- форма заказа -->
   </div>
-  <script src="js/main.js"></script>
+  <!-- <script src="js/main.js"></script> -->
 </body>
 </html>
 `;
-
-const STYLE_CSS_TEMPLATE = `/* styles */\n`;
-const MAIN_JS_TEMPLATE = `// scripts\n`;
 
 export interface StructureResult {
     created: string[];
@@ -447,11 +444,9 @@ export async function applyProjectStructure(root: vscode.Uri): Promise<Structure
     // 2) Картинки/css/js из корня и other/
     await redistributeAssets(root, moved, skipped, pathMap);
 
-    // 3) Заготовки, если нет
-    await ensureFile(root, 'css/style.css', STYLE_CSS_TEMPLATE, created);
-    await ensureFile(root, 'js/main.js', MAIN_JS_TEMPLATE, created);
+    // Папки css/ и js/ уже созданы выше — пустые style.css / main.js не создаём
 
-    // 4) Пути в index.html
+    // 3) Пути в index.html
     await rewriteIndexPaths(root, pathMap);
 
     return { created, moved, renamed, skipped };

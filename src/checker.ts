@@ -831,13 +831,16 @@ function checkHrefAttributes(document: Document, results: CheckResult[], whiteli
 
     document.querySelectorAll('img[src]').forEach(img => {
         const src = img.getAttribute('src') || '';
-        if (src.startsWith('/') || src.startsWith('./') || src.startsWith('../') ||
-            src.startsWith('data:') || !src.includes('://')) {
+        if (src.startsWith('data:') || src.startsWith('{') || src.includes('{')) {
+            return;
+        }
+        const isExternal = /^https?:\/\//i.test(src) || src.startsWith('//');
+        if (!isExternal) {
             return;
         }
         const isWhitelisted = whitelist.some(domain => src.includes(domain));
         if (!isWhitelisted && !src.includes('cdnjs.cloudflare.com')) {
-            push(results, 'warning', `⚠️ Внешнее изображение: img src=<span class="value-highlight">"${escapeHtml(src)}"</span>`, html, src);
+            push(results, false, `❌ Внешнее изображение: img src=<span class="value-highlight">"${escapeHtml(src)}"</span> — скачайте в images/ (Adway: Скачать внешние изображения)`, html, src);
         }
     });
 }
@@ -854,14 +857,21 @@ async function checkExternalResources(
 
     for (const link of Array.from(document.querySelectorAll('link[rel="stylesheet"][href]'))) {
         const href = link.getAttribute('href') || '';
-        if (href.startsWith('data:')) {
+        if (href.startsWith('data:') || href.startsWith('{')) {
             continue;
         }
         const fullUrl = resolveUrl(href, baseUrl);
-        if (href.includes('://')) {
+        const isExternal = /^https?:\/\//i.test(href) || href.startsWith('//');
+        if (isExternal) {
             const isWhitelisted = whitelist.some(domain => href.includes(domain));
             if (!isWhitelisted && !href.includes('cdnjs.cloudflare.com')) {
-                push(results, 'warning', `⚠️ Внешний CSS: <span class="value-highlight">"${escapeHtml(href)}"</span>`, html, href);
+                push(
+                    results,
+                    false,
+                    `❌ Внешний CSS: <span class="value-highlight">"${escapeHtml(href)}"</span> — положите файл в css/ и замените путь`,
+                    html,
+                    href
+                );
             }
         }
         if (fetchResource) {
@@ -882,14 +892,25 @@ async function checkExternalResources(
 
     for (const script of Array.from(document.querySelectorAll('script[src]'))) {
         const src = script.getAttribute('src') || '';
-        if (!src || src.startsWith('data:')) {
+        if (!src || src.startsWith('data:') || src.startsWith('{')) {
+            continue;
+        }
+        // jQuery с CDN — ок
+        if (src.includes('jquery') && src.includes('cdnjs.cloudflare.com')) {
             continue;
         }
         const fullUrl = resolveUrl(src, baseUrl);
-        if (src.includes('://')) {
+        const isExternal = /^https?:\/\//i.test(src) || src.startsWith('//');
+        if (isExternal) {
             const isWhitelisted = whitelist.some(domain => src.includes(domain));
             if (!isWhitelisted && !src.includes('cdnjs.cloudflare.com')) {
-                push(results, 'warning', `⚠️ Внешний JS: <span class="value-highlight">"${escapeHtml(src)}"</span>`, html, src);
+                push(
+                    results,
+                    false,
+                    `❌ Внешний JS: <span class="value-highlight">"${escapeHtml(src)}"</span> — положите файл в js/ и замените путь (jQuery CDN допустим)`,
+                    html,
+                    src
+                );
             }
         }
         if (fetchResource) {

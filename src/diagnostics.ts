@@ -19,7 +19,10 @@ export const AdwayDiagnosticCodes = {
     href: 'adway.href',
     target: 'adway.target',
     picture: 'adway.picture',
-    localPath: 'adway.localPath'
+    localPath: 'adway.localPath',
+    externalImage: 'adway.externalImage',
+    externalCss: 'adway.externalCss',
+    externalJs: 'adway.externalJs'
 } as const;
 
 export type DiagnosticsUpdatedEvent = {
@@ -28,9 +31,25 @@ export type DiagnosticsUpdatedEvent = {
     warningCount: number;
 };
 
-function detectCode(text: string): string | undefined {
+export function detectCode(text: string): string | undefined {
     const t = text.toLowerCase();
-    if (t.includes('jquery')) {
+    // пути/внешние ресурсы — раньше jquery (иначе «файл …jquery.min.js» ловится как jquery)
+    if (t.includes('неверный путь') || t.includes('файл не найден')) {
+        return AdwayDiagnosticCodes.localPath;
+    }
+    if (t.includes('внешнее изображение')) {
+        return AdwayDiagnosticCodes.externalImage;
+    }
+    if (t.includes('внешний css')) {
+        return AdwayDiagnosticCodes.externalCss;
+    }
+    if (t.includes('внешний js')) {
+        return AdwayDiagnosticCodes.externalJs;
+    }
+    if (t.includes('внешний action') || t.includes('action=')) {
+        return AdwayDiagnosticCodes.action;
+    }
+    if (t.includes('jquery') && !t.includes('файл не найден')) {
         return AdwayDiagnosticCodes.jquery;
     }
     if (t.includes('lazy loading')) {
@@ -60,9 +79,6 @@ function detectCode(text: string): string | undefined {
     if (t.includes('method')) {
         return AdwayDiagnosticCodes.method;
     }
-    if (t.includes('action=')) {
-        return AdwayDiagnosticCodes.action;
-    }
     if (t.includes('name="name"') && t.includes('required')) {
         return AdwayDiagnosticCodes.requiredName;
     }
@@ -81,17 +97,87 @@ function detectCode(text: string): string | undefined {
     if (t.includes('<picture') && t.includes('<source')) {
         return AdwayDiagnosticCodes.picture;
     }
-    if (t.includes('неверный путь') || t.includes('файл не найден')) {
-        return AdwayDiagnosticCodes.localPath;
-    }
-    if (
-        t.includes('неиспользуем') ||
-        t.includes('дублирующ') ||
-        t.includes('пустой <script')
-    ) {
-        return undefined; // warning-only, no quick fix yet
-    }
     return undefined;
+}
+
+export type ResultFixAction = {
+    label: string;
+    /** VS Code command id */
+    command: string;
+};
+
+/** Команды исправления для кода диагностики / сообщения чекера. */
+export function getFixesForCode(code: string | undefined): ResultFixAction[] {
+    if (!code) {
+        return [];
+    }
+
+    switch (code) {
+        case AdwayDiagnosticCodes.jquery:
+            return [{ label: 'Вставить jQuery 3.6.0', command: 'adway.insertJquery' }];
+        case AdwayDiagnosticCodes.lazy:
+            return [{ label: 'Вставить lazy loading', command: 'adway.insertLazy' }];
+        case AdwayDiagnosticCodes.scroll:
+            return [
+                { label: 'Вставить скрипт прокрутки', command: 'adway.insertScroll' },
+                { label: 'Добавить id="oneform"', command: 'adway.addOneform' }
+            ];
+        case AdwayDiagnosticCodes.oneform:
+            return [{ label: 'Добавить id="oneform"', command: 'adway.addOneform' }];
+        case AdwayDiagnosticCodes.validationMissing:
+            return [
+                { label: 'Вставить валидаторы', command: 'adway.insertValidation' },
+                { label: 'Вставить все скрипты (lazy+scroll+validation)', command: 'adway.insertScripts' }
+            ];
+        case AdwayDiagnosticCodes.validationOld:
+            return [
+                { label: 'Заменить старый валидатор имени', command: 'adway.fixValidationName' },
+                { label: 'Вставить новые валидаторы', command: 'adway.insertValidation' }
+            ];
+        case AdwayDiagnosticCodes.hidden:
+        case AdwayDiagnosticCodes.forms:
+        case AdwayDiagnosticCodes.method:
+        case AdwayDiagnosticCodes.action:
+        case AdwayDiagnosticCodes.requiredName:
+        case AdwayDiagnosticCodes.requiredPhone:
+            return [
+                { label: 'Починить форму заказа', command: 'adway.fixOrderForm' },
+                { label: 'Вставить 6 скрытых инпутов', command: 'adway.insertHiddenInputs' }
+            ];
+        case AdwayDiagnosticCodes.doctype:
+            return [{ label: 'Вставить <!DOCTYPE html>', command: 'adway.insertDoctype' }];
+        case AdwayDiagnosticCodes.base:
+            return [{ label: 'Удалить <base>', command: 'adway.removeBase' }];
+        case AdwayDiagnosticCodes.href:
+            return [{ label: 'Заменить все href на "#" ', command: 'adway.normalizeHrefs' }];
+        case AdwayDiagnosticCodes.target:
+            return [
+                { label: 'Удалить все target', command: 'adway.removeTarget' },
+                { label: 'Починить форму', command: 'adway.fixOrderForm' }
+            ];
+        case AdwayDiagnosticCodes.picture:
+            return [{ label: 'Убрать <source> из <picture>', command: 'adway.flattenPicture' }];
+        case AdwayDiagnosticCodes.localPath:
+            return [
+                { label: 'Исправить путь (images/css/js)', command: 'adway.fixLocalPath' },
+                { label: 'Исправить все пути', command: 'adway.fixAllLocalPaths' }
+            ];
+        case AdwayDiagnosticCodes.externalImage:
+            return [
+                { label: 'Скачать изображение(я) в images/', command: 'adway.downloadExternalImages' },
+                { label: 'Открыть в браузере (Save as)', command: 'adway.openExternalImages' }
+            ];
+        case AdwayDiagnosticCodes.externalCss:
+        case AdwayDiagnosticCodes.externalJs:
+            return [];
+        default:
+            return [];
+    }
+}
+
+/** Команды исправления для сообщения чекера (ПКМ в панели результатов). */
+export function getFixesForMessage(message: string): ResultFixAction[] {
+    return getFixesForCode(detectCode(stripHtml(message).replace(/[✅❌⚠️]/g, '').trim()));
 }
 
 export class AdwayDiagnostics {

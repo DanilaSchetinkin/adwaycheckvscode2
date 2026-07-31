@@ -1,8 +1,14 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
-import { CheckResult, LandingChecker } from './checker';
+import { CheckResult, LandingChecker, stripHtml } from './checker';
 import { AdwayCodeActionProvider, buildFixEdit, FixId, fixAllLocalPaths } from './codeActions';
-import { cleanupLanding } from './cleanup';
-import { AdwayDiagnostics } from './diagnostics';
+import { cleanupLanding, removeHtmlComments } from './cleanup';
+import {
+    collectFlaggedExternalImageUrls,
+    downloadExternalImages,
+    extractExternalImageUrlFromLine
+} from './downloadAssets';
+import { AdwayDiagnostics, detectCode, getFixesForCode, getFixesForMessage } from './diagnostics';
 import { normalizeAnchorHrefs } from './normalizeHrefs';
 import { AdwayResultsTreeProvider } from './resultsTree';
 import { initSheets, getSheetsDirectory } from './sheets';
@@ -13,6 +19,9 @@ import { AdwayStatusBar } from './statusBar';
 let diagnosticsProvider: AdwayDiagnostics;
 let statusBar: AdwayStatusBar;
 let resultsTree: AdwayResultsTreeProvider;
+let resultsPanel: vscode.WebviewPanel | undefined;
+let resultsPanelSource: { document: vscode.TextDocument; column: vscode.ViewColumn } | undefined;
+let resultsPanelResults: CheckResult[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Adway Checker активирован');
@@ -127,9 +136,9 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    async function runActiveFix(fixId: FixId, okMessage: string) {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor || editor.document.languageId !== 'html') {
+    async function runActiveFix(fixId: FixId, okMessage: string, ctx?: unknown) {
+        const editor = await getHtmlEditorForFix(ctx);
+        if (!editor) {
             vscode.window.showErrorMessage('Откройте HTML файл');
             return;
         }
@@ -164,71 +173,112 @@ export function activate(context: vscode.ExtensionContext) {
         const checker = new LandingChecker(editor.document);
         const results = await checker.check();
 
-        // Запоминаем основной редактор — клик по ошибке вернёт туда, а не в колонку отчёта
-        const sourceDocument = editor.document;
-        const sourceColumn = editor.viewColumn ?? vscode.ViewColumn.One;
+        resultsPanelSource = {
+            document: editor.document,
+            column: editor.viewColumn ?? vscode.ViewColumn.One
+        };
+        // тот же порядок, что в панели: ошибки → предупреждения → успехи
+        resultsPanelResults = [
+            ...results.filter(r => r.success === false),
+            ...results.filter(r => r.success === 'warning'),
+            ...results.filter(r => r.success === true)
+        ];
 
-        const panel = vscode.window.createWebviewPanel(
-            'adwayResults',
-            'Результаты проверки Adway',
-            vscode.ViewColumn.Beside,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: false
-            }
-        );
-
-        panel.webview.html = generateResultsHtml(results);
-
-        panel.webview.onDidReceiveMessage(
-            async message => {
-                if (message.command === 'goToLine') {
-                    const line = Number(message.line) || 0;
-                    const maxLine = Math.max(0, sourceDocument.lineCount - 1);
-                    const safeLine = Math.min(Math.max(0, line), maxLine);
-                    const position = new vscode.Position(safeLine, 0);
-                    const range = new vscode.Range(
-                        position,
-                        new vscode.Position(safeLine, sourceDocument.lineAt(safeLine).text.length)
-                    );
-
-                    const shown = await vscode.window.showTextDocument(sourceDocument, {
-                        viewColumn: sourceColumn,
-                        selection: range,
-                        preserveFocus: false,
-                        preview: false
-                    });
-                    shown.revealRange(range, vscode.TextEditorRevealType.InCenter);
+        if (!resultsPanel) {
+            resultsPanel = vscode.window.createWebviewPanel(
+                'adwayResults',
+                'Результаты проверки Adway',
+                vscode.ViewColumn.Beside,
+                {
+                    enableScripts: true,
+                    enableCommandUris: ['adway.resultsGoTo'],
+                    retainContextWhenHidden: true
                 }
-            },
-            undefined,
-            context.subscriptions
-        );
+            );
+
+            resultsPanel.onDidDispose(() => {
+                resultsPanel = undefined;
+                resultsPanelSource = undefined;
+                resultsPanelResults = [];
+            });
+        }
+
+        resultsPanel.title = `Результаты Adway — ${path.basename(editor.document.fileName)}`;
+        resultsPanel.webview.html = generateResultsHtml(resultsPanelResults);
+        resultsPanel.reveal(vscode.ViewColumn.Beside, true);
     });
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('adway.resultsGoTo', async (line?: number) => {
+            if (!resultsPanelSource) {
+                return;
+            }
+            const safe =
+                typeof line === 'number' && !Number.isNaN(line) && line >= 0 ? line : undefined;
+            await revealResultsLine(resultsPanelSource, safe);
+        }),
+        vscode.commands.registerCommand('adway.resultsShowFixesContext', async (ctx?: unknown) => {
+            await showFixesFromWebviewContext(ctx);
+        })
+    );
 
     const snippetProvider = new SnippetProvider();
 
     context.subscriptions.push(
         checkCommand,
-        vscode.commands.registerCommand('adway.insertJquery', () => snippetProvider.insertJquery()),
-        vscode.commands.registerCommand('adway.insertScripts', () => snippetProvider.insertScripts()),
-        vscode.commands.registerCommand('adway.insertHiddenInputs', () => snippetProvider.insertHiddenInputs()),
+        vscode.commands.registerCommand('adway.insertJquery', async (ctx?: unknown) => {
+            if (!(await getHtmlEditorForFix(ctx))) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            await snippetProvider.insertJquery();
+        }),
+        vscode.commands.registerCommand('adway.insertScripts', async (ctx?: unknown) => {
+            if (!(await getHtmlEditorForFix(ctx))) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            await snippetProvider.insertScripts();
+        }),
+        vscode.commands.registerCommand('adway.insertHiddenInputs', async (ctx?: unknown) => {
+            if (!(await getHtmlEditorForFix(ctx))) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            await snippetProvider.insertHiddenInputs();
+        }),
         vscode.commands.registerCommand('adway.insertForm', () => snippetProvider.insertForm()),
         vscode.commands.registerCommand('adway.insertDate', () => snippetProvider.insertDate()),
         vscode.commands.registerCommand('adway.insertVideoScript', () => snippetProvider.insertVideoScript()),
         vscode.commands.registerCommand('adway.openSnippets', () => snippetProvider.showSnippetsPicker()),
         vscode.commands.registerCommand('adway.initProjectStructure', () => initProjectStructureCommand()),
-        vscode.commands.registerCommand('adway.insertDoctype', () => runActiveFix('doctype', 'Adway: вставлен DOCTYPE')),
-        vscode.commands.registerCommand('adway.removeBase', () => runActiveFix('base', 'Adway: <base> удалён')),
-        vscode.commands.registerCommand('adway.removeTarget', () => runActiveFix('removeTarget', 'Adway: target удалены')),
-        vscode.commands.registerCommand('adway.flattenPicture', () => runActiveFix('flattenPicture', 'Adway: <source> убраны')),
-        vscode.commands.registerCommand('adway.insertLazy', () => runActiveFix('lazy', 'Adway: lazy loading вставлен')),
-        vscode.commands.registerCommand('adway.insertScroll', () => runActiveFix('scroll', 'Adway: скрипт прокрутки вставлен')),
-        vscode.commands.registerCommand('adway.insertValidation', () => runActiveFix('validation', 'Adway: валидаторы вставлены')),
-        vscode.commands.registerCommand('adway.fixValidationName', () =>
-            runActiveFix('validationReplaceName', 'Adway: валидатор имени обновлён')
+        vscode.commands.registerCommand('adway.insertDoctype', (ctx?: unknown) =>
+            runActiveFix('doctype', 'Adway: вставлен DOCTYPE', ctx)
         ),
-        vscode.commands.registerCommand('adway.addOneform', () => runActiveFix('oneform', 'Adway: id="oneform" добавлен')),
+        vscode.commands.registerCommand('adway.removeBase', (ctx?: unknown) =>
+            runActiveFix('base', 'Adway: <base> удалён', ctx)
+        ),
+        vscode.commands.registerCommand('adway.removeTarget', (ctx?: unknown) =>
+            runActiveFix('removeTarget', 'Adway: target удалены', ctx)
+        ),
+        vscode.commands.registerCommand('adway.flattenPicture', (ctx?: unknown) =>
+            runActiveFix('flattenPicture', 'Adway: <source> убраны', ctx)
+        ),
+        vscode.commands.registerCommand('adway.insertLazy', (ctx?: unknown) =>
+            runActiveFix('lazy', 'Adway: lazy loading вставлен', ctx)
+        ),
+        vscode.commands.registerCommand('adway.insertScroll', (ctx?: unknown) =>
+            runActiveFix('scroll', 'Adway: скрипт прокрутки вставлен', ctx)
+        ),
+        vscode.commands.registerCommand('adway.insertValidation', (ctx?: unknown) =>
+            runActiveFix('validation', 'Adway: валидаторы вставлены', ctx)
+        ),
+        vscode.commands.registerCommand('adway.fixValidationName', (ctx?: unknown) =>
+            runActiveFix('validationReplaceName', 'Adway: валидатор имени обновлён', ctx)
+        ),
+        vscode.commands.registerCommand('adway.addOneform', (ctx?: unknown) =>
+            runActiveFix('oneform', 'Adway: id="oneform" добавлен', ctx)
+        ),
         vscode.commands.registerCommand('adway.refreshSheets', async () => {
             const directory = getSheetsDirectory();
             if (!directory) {
@@ -246,14 +296,10 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showErrorMessage(`Adway: не удалось обновить Sheets — ${msg}`);
             }
         }),
-        vscode.commands.registerCommand('adway.normalizeHrefs', async () => {
-            const editor = vscode.window.activeTextEditor;
+        vscode.commands.registerCommand('adway.normalizeHrefs', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
             if (!editor) {
-                vscode.window.showErrorMessage('Нет активного редактора');
-                return;
-            }
-            if (editor.document.languageId !== 'html') {
-                vscode.window.showErrorMessage('Команда работает только для HTML файлов');
+                vscode.window.showErrorMessage('Откройте HTML файл');
                 return;
             }
 
@@ -299,7 +345,8 @@ export function activate(context: vscode.ExtensionContext) {
             const result = cleanupLanding(html, {
                 removeTarget: true,
                 removePictureSource: config.get<boolean>('cleanup.removePictureSource', true),
-                normalizeHrefs: true
+                normalizeHrefs: true,
+                removeComments: false
             });
 
             if (
@@ -336,14 +383,236 @@ export function activate(context: vscode.ExtensionContext) {
             }
             vscode.window.showInformationMessage(`Adway: почищено (${parts.join(', ')})`);
         }),
-        vscode.commands.registerCommand('adway.fixOrderForm', async () => {
+        vscode.commands.registerCommand('adway.removeComments', async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                vscode.window.showErrorMessage('Нет активного редактора');
+            if (!editor || editor.document.languageId !== 'html') {
+                vscode.window.showErrorMessage('Откройте HTML файл');
                 return;
             }
-            if (editor.document.languageId !== 'html') {
-                vscode.window.showErrorMessage('Команда работает только для HTML файлов');
+            const html = editor.document.getText();
+            const { html: next, removed } = removeHtmlComments(html);
+            if (removed === 0) {
+                vscode.window.showInformationMessage('Adway: HTML-комментариев не найдено');
+                return;
+            }
+            const fullRange = new vscode.Range(
+                editor.document.positionAt(0),
+                editor.document.positionAt(html.length)
+            );
+            const ok = await editor.edit(editBuilder => {
+                editBuilder.replace(fullRange, next);
+            });
+            if (!ok) {
+                vscode.window.showErrorMessage('Adway: не удалось удалить комментарии');
+                return;
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            vscode.window.showInformationMessage(`Adway: удалено комментариев: ${removed}`);
+        }),
+        vscode.commands.registerCommand(
+            'adway.downloadExternalImages',
+            async (
+                uriOrCtx?: string | Record<string, unknown>,
+                opts?: { line?: number; url?: string }
+            ) => {
+                let document: vscode.TextDocument | undefined;
+                let focusLine: number | undefined = opts?.line;
+                let focusUrl: string | undefined = opts?.url;
+
+                if (typeof uriOrCtx === 'string') {
+                    document = await vscode.workspace.openTextDocument(vscode.Uri.parse(uriOrCtx));
+                } else {
+                    document = (await getHtmlEditorForFix(uriOrCtx))?.document;
+                    const info = await resolveResultsContext(uriOrCtx);
+                    if (focusLine === undefined && info.line >= 0) {
+                        focusLine = info.line;
+                    }
+                }
+                if (!document || document.languageId !== 'html') {
+                    vscode.window.showErrorMessage('Откройте HTML файл');
+                    return;
+                }
+                if (document.uri.scheme !== 'file') {
+                    vscode.window.showErrorMessage('Сохраните файл на диск перед скачиванием');
+                    return;
+                }
+
+                const htmlDir = path.dirname(document.uri.fsPath);
+                const html = document.getText();
+
+                if (!focusUrl && focusLine !== undefined && focusLine >= 0 && focusLine < document.lineCount) {
+                    focusUrl = extractExternalImageUrlFromLine(document.lineAt(focusLine).text);
+                }
+
+                // URL только из ошибок «Внешнее изображение»
+                const errorUrls = collectExternalImageUrlsFromErrors(document);
+                const whitelist = vscode.workspace
+                    .getConfiguration('adway')
+                    .get<string[]>('linkWhitelist', []);
+                const flagged = collectFlaggedExternalImageUrls(html, whitelist);
+                const fromErrors = errorUrls.length > 0 ? errorUrls : flagged;
+
+                let onlyUrls: string[];
+                if (focusUrl) {
+                    onlyUrls = [focusUrl];
+                } else if (fromErrors.length > 0) {
+                    onlyUrls = fromErrors;
+                } else {
+                    vscode.window.showInformationMessage(
+                        'Adway: в ошибках нет внешних изображений — качать нечего'
+                    );
+                    return;
+                }
+
+                await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title:
+                            onlyUrls.length === 1
+                                ? 'Adway: скачивание изображения…'
+                                : `Adway: скачивание изображений из ошибок (${onlyUrls.length})…`,
+                        cancellable: false
+                    },
+                    async () => {
+                        const result = await downloadExternalImages(html, htmlDir, {
+                            onlyUrls
+                        });
+                        if (
+                            result.downloaded === 0 &&
+                            result.reused === 0 &&
+                            result.deduped === 0 &&
+                            result.failed.length === 0
+                        ) {
+                            vscode.window.showInformationMessage(
+                                'Adway: нечего скачивать (нет внешних URL в ошибках или уже локальные)'
+                            );
+                            return;
+                        }
+                        if (result.html !== html) {
+                            const fullRange = new vscode.Range(
+                                document!.positionAt(0),
+                                document!.positionAt(html.length)
+                            );
+                            const edit = new vscode.WorkspaceEdit();
+                            edit.replace(document!.uri, fullRange, result.html);
+                            await vscode.workspace.applyEdit(edit);
+                        }
+                        await diagnosticsProvider.updateDiagnostics(document!);
+                        const parts: string[] = [];
+                        if (result.downloaded) {
+                            parts.push(`скачано: ${result.downloaded}`);
+                        }
+                        if (result.reused) {
+                            parts.push(`уже были: ${result.reused}`);
+                        }
+                        if (result.deduped) {
+                            const names = result.dedupedFiles;
+                            const shown = names.slice(0, 8).join(', ');
+                            const more = names.length > 8 ? ` и ещё ${names.length - 8}` : '';
+                            parts.push(`дубли удалены: ${shown}${more}`);
+                        }
+                        if (result.failed.length) {
+                            parts.push(`не удалось: ${result.failed.length}`);
+                        }
+                        const msg = `Adway: ${parts.join('; ') || 'готово'} → images/`;
+                        if (result.dedupedFiles.length > 0) {
+                            console.log(
+                                '[Adway] удалены дубли в images/:',
+                                result.dedupedFiles.join(', ')
+                            );
+                        }
+                        if (result.failed.length > 0) {
+                            const pick = await vscode.window.showWarningMessage(
+                                msg,
+                                'Открыть нескачанные в браузере'
+                            );
+                            if (pick) {
+                                for (const url of result.failed) {
+                                    await vscode.env.openExternal(vscode.Uri.parse(url));
+                                }
+                            }
+                        } else {
+                            vscode.window.showInformationMessage(msg);
+                        }
+                    }
+                );
+            }
+        ),
+        vscode.commands.registerCommand('adway.openExternalImages', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            const whitelist = vscode.workspace
+                .getConfiguration('adway')
+                .get<string[]>('linkWhitelist', []);
+            const fromErrors = collectExternalImageUrlsFromErrors(editor.document);
+            const urls =
+                fromErrors.length > 0
+                    ? fromErrors
+                    : collectFlaggedExternalImageUrls(editor.document.getText(), whitelist);
+            if (urls.length === 0) {
+                vscode.window.showInformationMessage(
+                    'Adway: в ошибках нет внешних изображений'
+                );
+                return;
+            }
+
+            const mode = await vscode.window.showQuickPick(
+                [
+                    {
+                        label: '$(globe) Открыть все в браузере',
+                        description: `${urls.length} шт. — Save as вручную`,
+                        value: 'all' as const
+                    },
+                    {
+                        label: '$(list-selection) Выбрать картинки…',
+                        description: 'открыть только выбранные',
+                        value: 'pick' as const
+                    }
+                ],
+                { placeHolder: 'Внешние изображения из ошибок — Save as' }
+            );
+            if (!mode) {
+                return;
+            }
+
+            let toOpen = urls;
+            if (mode.value === 'pick') {
+                const selected = await vscode.window.showQuickPick(
+                    urls.map(u => {
+                        let label = u;
+                        try {
+                            label = path.basename(new URL(u).pathname) || u;
+                        } catch {
+                            // keep
+                        }
+                        return {
+                            label,
+                            description: u,
+                            url: u
+                        };
+                    }),
+                    { canPickMany: true, placeHolder: 'Выберите URL для открытия' }
+                );
+                if (!selected?.length) {
+                    return;
+                }
+                toOpen = selected.map(s => s.url);
+            }
+
+            for (const url of toOpen) {
+                await vscode.env.openExternal(vscode.Uri.parse(url));
+            }
+            vscode.window.showInformationMessage(
+                `Adway: открыто ${toOpen.length} — сохраните в images/ (Save as)`
+            );
+        }),
+        vscode.commands.registerCommand('adway.fixOrderForm', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
                 return;
             }
             const edit = buildFixEdit(editor.document, 'fixForm', editor.selection.active.line);
@@ -363,9 +632,9 @@ export function activate(context: vscode.ExtensionContext) {
                 'Adway: форма обновлена (action/method/oneform/required/hidden)'
             );
         }),
-        vscode.commands.registerCommand('adway.fixLocalPath', async () => {
-            const editor = vscode.window.activeTextEditor;
-            if (!editor || editor.document.languageId !== 'html') {
+        vscode.commands.registerCommand('adway.fixLocalPath', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
                 vscode.window.showErrorMessage('Откройте HTML файл');
                 return;
             }
@@ -384,9 +653,9 @@ export function activate(context: vscode.ExtensionContext) {
             await diagnosticsProvider.updateDiagnostics(editor.document);
             vscode.window.showInformationMessage('Adway: путь исправлен');
         }),
-        vscode.commands.registerCommand('adway.fixAllLocalPaths', async () => {
-            const editor = vscode.window.activeTextEditor;
-            if (!editor || editor.document.languageId !== 'html') {
+        vscode.commands.registerCommand('adway.fixAllLocalPaths', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
                 vscode.window.showErrorMessage('Откройте HTML файл');
                 return;
             }
@@ -433,14 +702,227 @@ export function activate(context: vscode.ExtensionContext) {
     }
 }
 
-function renderResultItem(result: CheckResult, cssClass: string): string {
+async function revealResultsLine(
+    source: { document: vscode.TextDocument; column: vscode.ViewColumn },
+    line: number | undefined
+): Promise<void> {
+    const { document: sourceDocument, column: sourceColumn } = source;
+
+    if (line === undefined || Number.isNaN(Number(line))) {
+        await vscode.window.showTextDocument(sourceDocument, {
+            viewColumn: sourceColumn,
+            preserveFocus: false,
+            preview: false
+        });
+        return;
+    }
+
+    const maxLine = Math.max(0, sourceDocument.lineCount - 1);
+    const safeLine = Math.min(Math.max(0, Number(line)), maxLine);
+    const position = new vscode.Position(safeLine, 0);
+    const range = new vscode.Range(
+        position,
+        new vscode.Position(safeLine, sourceDocument.lineAt(safeLine).text.length)
+    );
+
+    const shown = await vscode.window.showTextDocument(sourceDocument, {
+        viewColumn: sourceColumn,
+        selection: range,
+        preserveFocus: false,
+        preview: false
+    });
+    shown.revealRange(range, vscode.TextEditorRevealType.InCenter);
+}
+
+type WebviewResultsContext = {
+    index: number;
+    line: number;
+    fixCode?: string;
+};
+
+/** URL из ошибок Adway «Внешнее изображение» (панель + Problems). */
+function collectExternalImageUrlsFromErrors(document: vscode.TextDocument): string[] {
+    const urls = new Set<string>();
+
+    const addFromError = (text: string, line?: number) => {
+        const plain = stripHtml(text);
+        if (!/внешнее изображение/i.test(plain)) {
+            return;
+        }
+        let url = extractExternalImageUrlFromLine(plain);
+        if (!url && line !== undefined && line >= 0 && line < document.lineCount) {
+            url = extractExternalImageUrlFromLine(document.lineAt(line).text);
+        }
+        if (url) {
+            urls.add(url);
+        }
+    };
+
+    for (const result of resultsPanelResults) {
+        if (result.success === false) {
+            addFromError(result.text, result.line);
+        }
+    }
+
+    for (const diagnostic of vscode.languages.getDiagnostics(document.uri)) {
+        if (!diagnostic.source || !/adway/i.test(diagnostic.source)) {
+            continue;
+        }
+        addFromError(diagnostic.message, diagnostic.range.start.line);
+    }
+
+    return [...urls];
+}
+
+function toContextNumber(value: unknown): number {
+    if (typeof value === 'number' && !Number.isNaN(value)) {
+        return value;
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+        const n = Number(value);
+        if (!Number.isNaN(n)) {
+            return n;
+        }
+    }
+    return -1;
+}
+
+async function readWebviewContextValue(key: string): Promise<unknown> {
+    try {
+        return await vscode.commands.executeCommand<unknown>('getContextKeyValue', key);
+    } catch {
+        return undefined;
+    }
+}
+
+async function resolveResultsContext(ctx?: unknown): Promise<WebviewResultsContext> {
+    const fromObj =
+        ctx && typeof ctx === 'object' && !Array.isArray(ctx)
+            ? (ctx as Record<string, unknown>)
+            : undefined;
+
+    let index = toContextNumber(fromObj?.adwayIndex);
+    let line = toContextNumber(fromObj?.adwayLine);
+    let fixCode =
+        typeof fromObj?.adwayFixCode === 'string' ? fromObj.adwayFixCode : undefined;
+
+    if (index < 0) {
+        index = toContextNumber(await readWebviewContextValue('adwayIndex'));
+    }
+    if (line < 0) {
+        line = toContextNumber(await readWebviewContextValue('adwayLine'));
+    }
+    if (!fixCode) {
+        const code = await readWebviewContextValue('adwayFixCode');
+        if (typeof code === 'string' && code) {
+            fixCode = code;
+        }
+    }
+
+    if (index < 0 && line >= 0) {
+        index = resultsPanelResults.findIndex(r => r.line === line);
+    }
+    if (index < 0 && fixCode) {
+        index = resultsPanelResults.findIndex(
+            r =>
+                detectCode(stripHtml(r.text).replace(/[✅❌⚠️]/g, '').trim()) === fixCode
+        );
+    }
+
+    if (line < 0 && index >= 0) {
+        line = resultsPanelResults[index]?.line ?? -1;
+    }
+
+    return { index, line, fixCode };
+}
+
+/** Когда фокус в панели результатов — берём HTML из последней проверки. */
+async function getHtmlEditorForFix(ctx?: unknown): Promise<vscode.TextEditor | undefined> {
+    const info = await resolveResultsContext(ctx);
+    const active = vscode.window.activeTextEditor;
+
+    if (active?.document.languageId === 'html') {
+        if (
+            resultsPanelSource &&
+            active.document.uri.toString() === resultsPanelSource.document.uri.toString() &&
+            info.line >= 0
+        ) {
+            await revealResultsLine(resultsPanelSource, info.line);
+            return vscode.window.activeTextEditor;
+        }
+        return active;
+    }
+
+    if (resultsPanelSource) {
+        await revealResultsLine(
+            resultsPanelSource,
+            info.line >= 0 ? info.line : undefined
+        );
+        return vscode.window.activeTextEditor;
+    }
+
+    return undefined;
+}
+
+async function showFixesFromWebviewContext(ctx?: unknown): Promise<void> {
+    const info = await resolveResultsContext(ctx);
+    const result = info.index >= 0 ? resultsPanelResults[info.index] : undefined;
+    const fixes = result
+        ? getFixesForMessage(result.text)
+        : getFixesForCode(info.fixCode);
+
+    if (fixes.length === 0) {
+        vscode.window.showInformationMessage('Adway: для этого пункта нет команды исправления');
+        return;
+    }
+
+    await getHtmlEditorForFix(ctx);
+
+    const picked = await vscode.window.showQuickPick(
+        fixes.map(f => ({ label: f.label, command: f.command })),
+        {
+            title: 'Исправление',
+            placeHolder: 'Выберите команду'
+        }
+    );
+    if (picked) {
+        await vscode.commands.executeCommand(picked.command, ctx);
+    }
+}
+
+/** command: URI для webview (ЛКМ без скриптов). */
+function webviewCommandUri(command: string, ...args: unknown[]): string {
+    return `command:${command}?${encodeURIComponent(JSON.stringify(args))}`;
+}
+
+function renderResultItem(result: CheckResult, cssClass: string, index: number): string {
     const hasLine = result.line !== undefined;
-    const clickableClass = hasLine ? 'clickable' : '';
-    const onclick = hasLine ? `onclick="goToLine(${result.line})"` : '';
-    const lineNumberBadge = hasLine ? `<span class="line-number">строка ${(result.line ?? 0) + 1}</span>` : '';
-    return `<div class="result-item ${cssClass} ${clickableClass}" ${onclick}>
-        ${lineNumberBadge}
-        <span class="result-text">${result.text}</span>
+    const lineNumberBadge = hasLine
+        ? `<span class="line-number">строка ${(result.line ?? 0) + 1}</span>`
+        : '';
+    const canFix = cssClass === 'error' || cssClass === 'warning';
+    const goHref = webviewCommandUri('adway.resultsGoTo', hasLine ? result.line : -1);
+    const tip = canFix ? 'ЛКМ — к строке · ПКМ — исправить' : 'ЛКМ — к строке';
+    const fixCode = canFix
+        ? detectCode(stripHtml(result.text).replace(/[✅❌⚠️]/g, '').trim())
+        : undefined;
+    const vscodeContext = {
+        webviewSection: 'adwayResult',
+        preventDefaultContextMenuItems: true,
+        adwayIndex: index,
+        adwayLine: hasLine ? result.line : -1,
+        adwayCanFix: canFix,
+        ...(fixCode ? { adwayFixCode: fixCode } : {})
+    };
+    const contextAttr = JSON.stringify(vscodeContext).replace(/'/g, '&#39;');
+
+    return `<div class="result-item ${cssClass}"
+        data-vscode-context='${contextAttr}'
+        title="${tip}">
+        <a class="result-main clickable" href="${goHref}">
+            ${lineNumberBadge}
+            <span class="result-text">${result.text}</span>
+        </a>
     </div>`;
 }
 
@@ -452,6 +934,7 @@ function generateResultsHtml(results: CheckResult[]): string {
     let html = `<!DOCTYPE html>
     <html>
     <head>
+        <meta charset="UTF-8">
         <style>
             body {
                 font-family: var(--vscode-font-family);
@@ -479,19 +962,27 @@ function generateResultsHtml(results: CheckResult[]): string {
                 margin-bottom: 10px;
             }
             .result-item {
-                padding: 8px;
                 margin: 5px 0;
                 border-radius: 4px;
                 background-color: var(--vscode-editor-inactiveSelectionBackground);
                 display: flex;
+                align-items: stretch;
+                user-select: none;
+            }
+            .result-main {
+                flex: 1;
+                display: flex;
                 align-items: center;
                 gap: 10px;
+                padding: 8px;
+                text-decoration: none;
+                color: inherit;
+                min-width: 0;
             }
-            .result-item.clickable {
+            .result-main.clickable {
                 cursor: pointer;
-                transition: background-color 0.2s;
             }
-            .result-item.clickable:hover {
+            .result-item:hover {
                 background-color: var(--vscode-list-hoverBackground);
             }
             .line-number {
@@ -503,9 +994,11 @@ function generateResultsHtml(results: CheckResult[]): string {
                 font-weight: bold;
                 min-width: 40px;
                 text-align: center;
+                flex-shrink: 0;
             }
             .result-text {
                 flex: 1;
+                min-width: 0;
             }
             .error {
                 color: var(--vscode-errorForeground);
@@ -526,45 +1019,36 @@ function generateResultsHtml(results: CheckResult[]): string {
     </head>
     <body>`;
 
+    let itemIndex = 0;
+
     if (errors.length > 0) {
         html += `<div class="result-group error-group">
-            <div class="group-title">🔴 Ошибки (${errors.length})</div>`;
+            <div class="group-title">Ошибки (${errors.length})</div>`;
         errors.forEach(result => {
-            html += renderResultItem(result, 'error');
+            html += renderResultItem(result, 'error', itemIndex++);
         });
         html += `</div>`;
     }
 
     if (warnings.length > 0) {
         html += `<div class="result-group warning-group">
-            <div class="group-title">⚠️ Предупреждения (${warnings.length})</div>`;
+            <div class="group-title">Предупреждения (${warnings.length})</div>`;
         warnings.forEach(result => {
-            html += renderResultItem(result, 'warning');
+            html += renderResultItem(result, 'warning', itemIndex++);
         });
         html += `</div>`;
     }
 
     if (successes.length > 0) {
         html += `<div class="result-group success-group">
-            <div class="group-title">✅ Успешные проверки (${successes.length})</div>`;
+            <div class="group-title">Успешные проверки (${successes.length})</div>`;
         successes.forEach(result => {
-            html += renderResultItem(result, 'success');
+            html += renderResultItem(result, 'success', itemIndex++);
         });
         html += `</div>`;
     }
 
-    html += `
-        <script>
-            const vscode = acquireVsCodeApi();
-            
-            function goToLine(line) {
-                vscode.postMessage({
-                    command: 'goToLine',
-                    line: line
-                });
-            }
-        </script>
-    </body></html>`;
+    html += `</body></html>`;
     return html;
 }
 
