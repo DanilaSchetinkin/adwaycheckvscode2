@@ -1,82 +1,118 @@
 ADWAY CHECKER — VS CODE EXTENSION
 Автор: Danila Schetinkin
-GitHub: https://github.com/DanilaSchetinkin/adway-checker-vscode
+GitHub: https://github.com/DanilaSchetinkin
+Репозиторий: https://github.com/DanilaSchetinkin/adway-checker-vscode
 ==================================================================
 
 
-1. ЗАПУСК
----------
+1. ЗАПУСК (РАЗРАБОТКА)
+----------------------
 Первый раз:
-  1. npm install
-  2. npm run compile
-  3. Открыть папку в VS Code → нажать F5
+  1. git clone https://github.com/DanilaSchetinkin/adway-checker-vscode.git
+  2. cd adway-checker-vscode
+  3. npm install
+  4. npm run compile
+  5. Открыть папку в VS Code → F5 (Extension Development Host)
+
+Обновление после git pull:
+  npm install
+  npm run compile
+  снова F5
+  (если менялся package.json — Reload Window недостаточно)
+
 
 2. ЧТО МОЖЕТ ПОЛЬЗОВАТЕЛЬ
 --------------------------
-В любом HTML файле нажать правую кнопку мыши:
+Открыть HTML лендинга → проверить / править.
 
-  → Adway: Проверить лендинг       — проверка всего файла
-  → Adway: Открыть все сниппеты    — меню вставки кода
-  → Adway: Вставить код ▶          — быстрая вставка:
-       · jQuery
-       · Обязательные скрипты
-       · Скрытые инпуты
-       · Форму
-       · Дату
-       · HLS видео
+Проверка:
+  Ctrl+Alt+A  — Adway: Проверить лендинг
+  ПКМ по редактору → Adway: Проверить лендинг
 
-  Ctrl+Alt+A  — проверить лендинг (горячая клавиша)
-  Ctrl+Shift+M — показать все ошибки (Problems Panel)
+Где смотреть результаты:
+  · webview «Результаты проверки Adway» (справа после проверки)
+  · Problems (Ctrl+Shift+M)
+  · Activity Bar → Adway → Results
 
-  Автодополнение: печатать adway- и выбрать из списка:
-    adway-jquery, adway-form, adway-scroll,
-    adway-validation, adway-hidden, adway-date,
-    adway-video, adway-viewport, adway-timer
+Панель результатов (webview):
+  · ЛКМ — переход к строке ошибки / предупреждения
+  · ПКМ — команды исправления (jQuery, форма, пути, скачать картинку…)
 
-  Кликнуть на ошибку в результатах → переход к строке кода.
+Также:
+  · Quick Fix (лампочка) у диагностики
+  · сниппеты: печатать adway- (jquery, form, scroll, validation, hidden, date, video…)
+  · ПКМ редактора: очистка, форма, пути, сниппеты, структура проекта
 
 
-3. ЧТО ПРОВЕРЯЕТ ПРОГРАММА
----------------------------
+3. ГОРЯЧИЕ КЛАВИШИ (HTML)
+-------------------------
+На Mac вместо Ctrl — Cmd.
+
+  Ctrl+Alt+A  — проверить лендинг
+  Ctrl+Alt+C  — почистить лендинг (target, picture, href)
+  Ctrl+Alt+F  — починить форму заказа
+  Ctrl+Alt+P  — исправить все локальные пути (images/css/js)
+  Ctrl+Alt+H  — заменить все href у <a> на "#"
+  Ctrl+Alt+R  — показать панель результатов (дерево Adway)
+  Ctrl+Alt+L  — вставить lazy loading
+  Ctrl+Alt+V  — вставить валидаторы
+  Ctrl+Alt+S  — вставить все обязательные скрипты
+  Ctrl+Alt+M  — удалить HTML-комментарии
+  Ctrl+Alt+D  — скачать внешние изображения из ошибок → images/
+  Ctrl+Alt+O  — открыть внешние изображения в браузере (Save as)
+
+
+4. ЧТО ПРОВЕРЯЕТ ПРОГРАММА
+--------------------------
   · DOCTYPE html
-  · jQuery 3.6.0 в <head>
-  · Скрипт lazy loading
-  · Скрипт прокрутки к форме + наличие id="oneform"
-  · Скрипты валидации name и phone
-  · Формы: 6 скрытых инпутов (fbpx, utm_code, cid, sid, hash, country)
-  · Формы: action="/order.php" и method="post"
-  · Инпуты name="name" и name="phone" с required
-  · Ссылки href="#"
+  · jQuery 3.6.0 в <head> (CDN cdnjs)
+  · Lazy loading, scroll к #oneform, валидация name/phone
+  · Формы: 6 hidden (fbpx, utm_code, cid, sid, hash, country)
+  · Формы: action="/order.php", method="post", required у name/phone
+  · id="oneform", лишний <base>
+  · Ссылки <a href> (#, offer, tel, mailto…)
+  · target, <picture>/<source>
+  · Локальные пути (подсказки images/ css/ js/)
+  · Внешние изображения / CSS / JS (вне whitelist)
+  · SID/Country (если настроен Sheets)
+  · Пустые / дублирующиеся / неиспользуемые скрипты (эвристика)
 
 
-4. КАК ОБНОВЛЯТЬ ССЫЛКИ И ВЕРСИИ
-----------------------------------
-Все проверяемые строки находятся в файле:
-  src/checker.ts
+5. ПОЛЕЗНЫЕ КОМАНДЫ
+-------------------
+  Adway: Создать структуру проекта
+    → папки images/, css/, js/, other/, index.html
+    (пустые style.css / main.js больше не создаются)
 
-Примеры что и где менять:
+  Adway: Почистить лендинг
+    → убрать target, flatten picture, нормализация href
 
-  jQuery версия:
-    Найти: headContent.includes('3.6.0')
-    Заменить на нужную версию, например: '3.7.0'
+  Adway: Починить форму заказа
+    → action/method/oneform/required/hidden
 
-  jQuery CDN адрес:
-    Найти: headContent.includes('cdnjs.cloudflare.com')
-    Заменить на нужный домен
+  Adway: Скачать внешние изображения
+    → только URL из ошибок «Внешнее изображение»
+    → уже есть в images/ по имени — не качает снова
+    → байт-в-байт дубли схлопываются (в уведомлении — какие файлы удалены)
 
-  Обязательные поля формы (сейчас: fbpx, utm_code, cid, sid, hash, country):
-    Найти: const fields = ['fbpx', 'utm_code', 'cid', 'sid', 'hash', 'country']
-    Добавить или убрать нужные поля
+  Adway: Обновить кэш SID/Country
+    → перечитать Sheets
 
-  Action формы (сейчас: /order.php):
-    Найти: formLower.includes('action="/order.php"')
-    Заменить на нужный путь
 
-  Сниппеты (тексты кода для вставки):
-    Файл: snippets/adway.json
-    Найти нужный сниппет по имени и отредактировать "body"
+6. КАК МЕНЯТЬ ПРАВИЛА ПРОВЕРКИ
+--------------------------------
+Логика проверок:     src/checker.ts
+Диагностики / фиксы: src/diagnostics.ts, src/codeActions.ts
+Скачивание картинок: src/downloadAssets.ts
+Сниппеты вставки:    snippets/adway.json  и  src/snippetTexts.ts
+Хоткеи / команды:    package.json
 
-После любых изменений в src/ обязательно:
+Примеры в checker.ts:
+  · версия jQuery — поиск 3.6.0 / cdnjs.cloudflare.com
+  · поля формы — fbpx, utm_code, cid, sid, hash, country
+  · action формы — /order.php
+
+После правок в src/:
   npm run compile
-  Перезапустить Extension Host (F5)
+  F5 (перезапуск Extension Host)
 ==================================================================
