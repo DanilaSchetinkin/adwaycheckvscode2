@@ -112,3 +112,6 @@ export const TIMER_SNIPPET = `<div>
 </script>`;
 
 export const ONEFORM_ATTR = ' id="oneform"';
+
+/** Якорь для скрипта прокрутки (часто рядом с формой) */
+export const ONEFORM_SPAN = '<span id="oneform"></span>';

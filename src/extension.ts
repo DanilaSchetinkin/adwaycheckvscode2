@@ -1,20 +1,34 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { CheckResult, LandingChecker, stripHtml } from './checker';
-import { AdwayCodeActionProvider, buildFixEdit, FixId, fixAllLocalPaths } from './codeActions';
-import { cleanupLanding, removeHtmlComments } from './cleanup';
+import { AdwayCodeActionProvider, buildFixEdit, FixId, fixAllLocalPathsWithCss } from './codeActions';
+import { cleanupLanding, moveLinksToHead, removeHtmlComments } from './cleanup';
 import {
     collectFlaggedExternalImageUrls,
+    dedupeAssetFolders,
     downloadExternalImages,
     extractExternalImageUrlFromLine
 } from './downloadAssets';
 import { AdwayDiagnostics, detectCode, getFixesForCode, getFixesForMessage } from './diagnostics';
 import { normalizeAnchorHrefs } from './normalizeHrefs';
 import { AdwayResultsTreeProvider } from './resultsTree';
+import {
+    checkScriptAssets,
+    insertScriptSrcTag,
+    removeScriptSrcTag
+} from './scriptAssets';
 import { initSheets, getSheetsDirectory } from './sheets';
 import { initProjectStructureCommand } from './projectStructure';
+import { ONEFORM_SPAN } from './snippetTexts';
 import { SnippetProvider } from './snippets';
 import { AdwayStatusBar } from './statusBar';
+import { setupAdwayVideoPlayer } from './videoPlayer';
+import {
+    buildVideoHtmlBlock,
+    buildVideoJs,
+    VIDEO_CSS
+} from './videoTemplates';
 
 let diagnosticsProvider: AdwayDiagnostics;
 let statusBar: AdwayStatusBar;
@@ -279,6 +293,251 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('adway.addOneform', (ctx?: unknown) =>
             runActiveFix('oneform', 'Adway: id="oneform" добавлен', ctx)
         ),
+        vscode.commands.registerCommand('adway.insertOneformSpan', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            const html = editor.document.getText();
+            if (/id\s*=\s*["']oneform["']/i.test(html)) {
+                vscode.window.showInformationMessage('Adway: id="oneform" уже есть в документе');
+                return;
+            }
+            const ok = await editor.edit(editBuilder => {
+                editBuilder.insert(editor.selection.active, ONEFORM_SPAN);
+            });
+            if (!ok) {
+                vscode.window.showErrorMessage('Adway: не удалось вставить span');
+                return;
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            vscode.window.showInformationMessage('Adway: вставлен <span id="oneform"></span>');
+        }),
+        vscode.commands.registerCommand('adway.connectScriptFile', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            if (editor.document.uri.scheme !== 'file') {
+                vscode.window.showErrorMessage('Сохраните HTML на диск');
+                return;
+            }
+            const htmlDir = path.dirname(editor.document.uri.fsPath);
+            let scriptPath = await pickScriptPathFromContext(ctx, editor.document.getText(), htmlDir, 'unconnected');
+            if (!scriptPath) {
+                return;
+            }
+            const html = editor.document.getText();
+            if (new RegExp(`<script\\b[^>]*\\bsrc\\s*=\\s*(["'])(?:\\./)?${escapeRegExp(scriptPath)}\\1`, 'i').test(html)) {
+                vscode.window.showInformationMessage(`Adway: ${scriptPath} уже подключён`);
+                return;
+            }
+            const next = insertScriptSrcTag(html, scriptPath);
+            const fullRange = new vscode.Range(
+                editor.document.positionAt(0),
+                editor.document.positionAt(html.length)
+            );
+            const ok = await editor.edit(eb => eb.replace(fullRange, next));
+            if (!ok) {
+                vscode.window.showErrorMessage('Adway: не удалось подключить скрипт');
+                return;
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            vscode.window.showInformationMessage(`Adway: подключён <script src="${scriptPath}">`);
+        }),
+        vscode.commands.registerCommand('adway.deleteUnconnectedScript', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            if (editor.document.uri.scheme !== 'file') {
+                vscode.window.showErrorMessage('Сохраните HTML на диск');
+                return;
+            }
+            const htmlDir = path.dirname(editor.document.uri.fsPath);
+            const scriptPath = await pickScriptPathFromContext(
+                ctx,
+                editor.document.getText(),
+                htmlDir,
+                'unconnected'
+            );
+            if (!scriptPath) {
+                return;
+            }
+            const full = path.join(htmlDir, scriptPath);
+            if (!fs.existsSync(full)) {
+                vscode.window.showErrorMessage(`Adway: файл не найден: ${scriptPath}`);
+                return;
+            }
+            const confirm = await vscode.window.showWarningMessage(
+                `Удалить неподключённый файл «${scriptPath}»?`,
+                { modal: true },
+                'Удалить'
+            );
+            if (confirm !== 'Удалить') {
+                return;
+            }
+            try {
+                fs.unlinkSync(full);
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Adway: не удалось удалить — ${msg}`);
+                return;
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            vscode.window.showInformationMessage(`Adway: удалён ${scriptPath}`);
+        }),
+        vscode.commands.registerCommand('adway.removeMissingScriptTag', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            const htmlDir =
+                editor.document.uri.scheme === 'file'
+                    ? path.dirname(editor.document.uri.fsPath)
+                    : undefined;
+            const scriptPath = await pickScriptPathFromContext(
+                ctx,
+                editor.document.getText(),
+                htmlDir,
+                'missing'
+            );
+            if (!scriptPath) {
+                return;
+            }
+            const html = editor.document.getText();
+            const { html: next, removed } = removeScriptSrcTag(html, scriptPath);
+            if (removed === 0) {
+                vscode.window.showInformationMessage(
+                    `Adway: тег <script src="${scriptPath}"> не найден`
+                );
+                return;
+            }
+            const fullRange = new vscode.Range(
+                editor.document.positionAt(0),
+                editor.document.positionAt(html.length)
+            );
+            const ok = await editor.edit(eb => eb.replace(fullRange, next));
+            if (!ok) {
+                vscode.window.showErrorMessage('Adway: не удалось удалить тег script');
+                return;
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            vscode.window.showInformationMessage(
+                `Adway: удалено тегов script: ${removed} (${scriptPath})`
+            );
+        }),
+        vscode.commands.registerCommand('adway.dedupeImages', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            if (editor.document.uri.scheme !== 'file') {
+                vscode.window.showErrorMessage('Сохраните HTML на диск');
+                return;
+            }
+            const htmlDir = path.dirname(editor.document.uri.fsPath);
+            const html = editor.document.getText();
+            const { html: next, removed, kept } = dedupeAssetFolders(html, htmlDir);
+            if (removed.length === 0) {
+                vscode.window.showInformationMessage(
+                    `Adway: дублей в images/css/js нет (уникальных файлов: ${kept})`
+                );
+                return;
+            }
+            if (next !== html) {
+                const fullRange = new vscode.Range(
+                    editor.document.positionAt(0),
+                    editor.document.positionAt(html.length)
+                );
+                const ok = await editor.edit(eb => eb.replace(fullRange, next));
+                if (!ok) {
+                    vscode.window.showErrorMessage('Adway: HTML не обновлён после дедупа');
+                    return;
+                }
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            const preview = removed.slice(0, 8).join(', ') + (removed.length > 8 ? '…' : '');
+            vscode.window.showInformationMessage(
+                `Adway: удалено дублей: ${removed.length} (${preview})`
+            );
+        }),
+        vscode.commands.registerCommand('adway.setupVideoPlayer', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            if (editor.document.uri.scheme !== 'file') {
+                vscode.window.showErrorMessage('Сохраните HTML на диск');
+                return;
+            }
+            await editor.document.save();
+            const htmlDir = path.dirname(editor.document.uri.fsPath);
+            const html = editor.document.getText();
+            const result = setupAdwayVideoPlayer(html, htmlDir);
+            if (result.html !== html) {
+                const fullRange = new vscode.Range(
+                    editor.document.positionAt(0),
+                    editor.document.positionAt(html.length)
+                );
+                const ok = await editor.edit(eb => eb.replace(fullRange, result.html));
+                if (!ok) {
+                    vscode.window.showErrorMessage('Adway: не удалось обновить HTML');
+                    return;
+                }
+                await editor.document.save();
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            const parts = [
+                ...result.created.map(c => `+${c}`),
+                ...result.moved,
+                ...result.notes.slice(0, 4)
+            ];
+            vscode.window.showInformationMessage(
+                `Adway: бесплатный видео-плеер — ${parts.slice(0, 6).join('; ') || 'готово'}`
+            );
+        }),
+        vscode.commands.registerCommand('adway.insertVideoBlock', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                return;
+            }
+            await editor.edit(eb => eb.insert(editor.selection.active, buildVideoHtmlBlock()));
+        }),
+        vscode.commands.registerCommand('adway.insertVideoCss', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.document.uri.scheme !== 'file') {
+                vscode.window.showErrorMessage('Откройте файл на диске');
+                return;
+            }
+            const htmlDir = path.dirname(editor.document.uri.fsPath);
+            const cssDir = path.join(htmlDir, 'css');
+            if (!fs.existsSync(cssDir)) {
+                fs.mkdirSync(cssDir, { recursive: true });
+            }
+            fs.writeFileSync(path.join(cssDir, 'video.css'), VIDEO_CSS, 'utf8');
+            vscode.window.showInformationMessage('Adway: записан css/video.css');
+        }),
+        vscode.commands.registerCommand('adway.insertVideoJsFile', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.document.uri.scheme !== 'file') {
+                vscode.window.showErrorMessage('Откройте файл на диске');
+                return;
+            }
+            const htmlDir = path.dirname(editor.document.uri.fsPath);
+            const jsDir = path.join(htmlDir, 'js');
+            if (!fs.existsSync(jsDir)) {
+                fs.mkdirSync(jsDir, { recursive: true });
+            }
+            fs.writeFileSync(path.join(jsDir, 'video.js'), buildVideoJs(150), 'utf8');
+            vscode.window.showInformationMessage('Adway: записан js/video.js');
+        }),
         vscode.commands.registerCommand('adway.refreshSheets', async () => {
             const directory = getSheetsDirectory();
             if (!directory) {
@@ -346,13 +605,15 @@ export function activate(context: vscode.ExtensionContext) {
                 removeTarget: true,
                 removePictureSource: config.get<boolean>('cleanup.removePictureSource', true),
                 normalizeHrefs: true,
-                removeComments: false
+                removeComments: false,
+                moveLinksToHead: true
             });
 
             if (
                 result.removedTargets === 0 &&
                 result.flattenedPictures === 0 &&
-                result.replacedHrefs === 0
+                result.replacedHrefs === 0 &&
+                result.movedLinks === 0
             ) {
                 vscode.window.showInformationMessage('Adway: нечего чистить');
                 return;
@@ -381,7 +642,34 @@ export function activate(context: vscode.ExtensionContext) {
             if (result.replacedHrefs) {
                 parts.push(`href→#: ${result.replacedHrefs}`);
             }
+            if (result.movedLinks) {
+                parts.push(`link→head: ${result.movedLinks}`);
+            }
             vscode.window.showInformationMessage(`Adway: почищено (${parts.join(', ')})`);
+        }),
+        vscode.commands.registerCommand('adway.moveLinksToHead', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            const html = editor.document.getText();
+            const { html: next, moved } = moveLinksToHead(html);
+            if (moved === 0) {
+                vscode.window.showInformationMessage('Adway: все <link> уже в <head>');
+                return;
+            }
+            const fullRange = new vscode.Range(
+                editor.document.positionAt(0),
+                editor.document.positionAt(html.length)
+            );
+            const ok = await editor.edit(eb => eb.replace(fullRange, next));
+            if (!ok) {
+                vscode.window.showErrorMessage('Adway: не удалось перенести <link>');
+                return;
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            vscode.window.showInformationMessage(`Adway: перенесено <link> в <head>: ${moved}`);
         }),
         vscode.commands.registerCommand('adway.removeComments', async () => {
             const editor = vscode.window.activeTextEditor;
@@ -641,7 +929,7 @@ export function activate(context: vscode.ExtensionContext) {
             const edit = buildFixEdit(editor.document, 'fixLocalPath', editor.selection.active.line);
             if (!edit) {
                 vscode.window.showInformationMessage(
-                    'Adway: на этой строке нечего чинить (нет файла в images/css/js)'
+                    'Adway: на этой строке нечего чинить (файл не найден в проекте)'
                 );
                 return;
             }
@@ -659,20 +947,29 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showErrorMessage('Откройте HTML файл');
                 return;
             }
-            const edit = fixAllLocalPaths(editor.document);
-            if (!edit) {
+            const { edit, cssFixed, cssFiles } = fixAllLocalPathsWithCss(editor.document);
+            if (!edit && cssFixed === 0) {
                 vscode.window.showInformationMessage(
-                    'Adway: нет путей, которые можно заменить на images/css/js'
+                    'Adway: нет путей, которые можно заменить на найденные файлы'
                 );
                 return;
             }
-            const ok = await vscode.workspace.applyEdit(edit);
-            if (!ok) {
-                vscode.window.showErrorMessage('Adway: пути не исправлены');
-                return;
+            if (edit) {
+                const ok = await vscode.workspace.applyEdit(edit);
+                if (!ok) {
+                    vscode.window.showErrorMessage('Adway: пути в HTML не исправлены');
+                    return;
+                }
             }
             await diagnosticsProvider.updateDiagnostics(editor.document);
-            vscode.window.showInformationMessage('Adway: все найденные пути исправлены');
+            const parts: string[] = [];
+            if (edit) {
+                parts.push('HTML');
+            }
+            if (cssFixed) {
+                parts.push(`CSS: ${cssFixed} (${cssFiles.slice(0, 4).join(', ')})`);
+            }
+            vscode.window.showInformationMessage(`Adway: пути исправлены (${parts.join('; ')})`);
         })
     );
 
@@ -834,6 +1131,63 @@ async function resolveResultsContext(ctx?: unknown): Promise<WebviewResultsConte
     }
 
     return { index, line, fixCode };
+}
+
+function escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractQuotedPath(text: string): string | undefined {
+    const plain = stripHtml(text);
+    const m =
+        plain.match(/"((?:js|scripts)\/[^"]+\.(?:js|mjs|cjs))"/i) ||
+        plain.match(/"([^"]+\.(?:js|mjs|cjs))"/i) ||
+        plain.match(/"([^"]+)"/);
+    return m?.[1]?.replace(/^\.\//, '');
+}
+
+async function pickScriptPathFromContext(
+    ctx: unknown,
+    html: string,
+    htmlDir: string | undefined,
+    kind: 'missing' | 'unconnected'
+): Promise<string | undefined> {
+    const info = await resolveResultsContext(ctx);
+    if (info.index >= 0) {
+        const fromMsg = extractQuotedPath(resultsPanelResults[info.index]?.text || '');
+        if (fromMsg) {
+            return fromMsg;
+        }
+    }
+
+    if (!htmlDir) {
+        vscode.window.showInformationMessage('Adway: нет пути к скрипту');
+        return undefined;
+    }
+
+    const issues = checkScriptAssets(html, htmlDir).filter(i => i.kind === kind);
+    if (issues.length === 0) {
+        vscode.window.showInformationMessage(
+            kind === 'unconnected'
+                ? 'Adway: нет неподключённых скриптов в js/'
+                : 'Adway: нет битых <script src>'
+        );
+        return undefined;
+    }
+    if (issues.length === 1) {
+        return issues[0].path;
+    }
+    const picked = await vscode.window.showQuickPick(
+        issues.map(i => ({ label: i.path, path: i.path })),
+        {
+            title:
+                kind === 'unconnected'
+                    ? 'Неподключённый скрипт'
+                    : 'Битый script src',
+            placeHolder: 'Выберите файл'
+        }
+    );
+    return picked?.path;
 }
 
 /** Когда фокус в панели результатов — берём HTML из последней проверки. */

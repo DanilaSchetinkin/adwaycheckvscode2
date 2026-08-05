@@ -19,10 +19,20 @@ export const AdwayDiagnosticCodes = {
     href: 'adway.href',
     target: 'adway.target',
     picture: 'adway.picture',
+    linkOutsideHead: 'adway.linkOutsideHead',
     localPath: 'adway.localPath',
     externalImage: 'adway.externalImage',
     externalCss: 'adway.externalCss',
-    externalJs: 'adway.externalJs'
+    externalJs: 'adway.externalJs',
+    scriptMissing: 'adway.script.missing',
+    scriptUnconnected: 'adway.script.unconnected',
+    videoHermes: 'adway.video.hermes',
+    videoVideojs: 'adway.video.videojs',
+    videoBlob: 'adway.video.blob',
+    videoCss: 'adway.video.css',
+    videoJs: 'adway.video.js',
+    videoMediaPath: 'adway.video.mediaPath',
+    videoFormInside: 'adway.video.formInside'
 } as const;
 
 export type DiagnosticsUpdatedEvent = {
@@ -33,6 +43,33 @@ export type DiagnosticsUpdatedEvent = {
 
 export function detectCode(text: string): string | undefined {
     const t = text.toLowerCase();
+    if (t.includes('скрипт не подключ') || t.includes('не подключён в html')) {
+        return AdwayDiagnosticCodes.scriptUnconnected;
+    }
+    if (t.includes('скрипт не найден')) {
+        return AdwayDiagnosticCodes.scriptMissing;
+    }
+    if (t.includes('hermes')) {
+        return AdwayDiagnosticCodes.videoHermes;
+    }
+    if (t.includes('videojs') || t.includes('video-js')) {
+        return AdwayDiagnosticCodes.videoVideojs;
+    }
+    if (t.includes('blob:') || t.includes('scrapbook')) {
+        return AdwayDiagnosticCodes.videoBlob;
+    }
+    if (t.includes('css/video.css')) {
+        return AdwayDiagnosticCodes.videoCss;
+    }
+    if (t.includes('js/video.js')) {
+        return AdwayDiagnosticCodes.videoJs;
+    }
+    if (t.includes('не в media') || t.includes('видеофайл в корне') || t.includes('перенесите в media')) {
+        return AdwayDiagnosticCodes.videoMediaPath;
+    }
+    if (t.includes('форма внутри #container_video')) {
+        return AdwayDiagnosticCodes.videoFormInside;
+    }
     // пути/внешние ресурсы — раньше jquery (иначе «файл …jquery.min.js» ловится как jquery)
     if (t.includes('неверный путь') || t.includes('файл не найден')) {
         return AdwayDiagnosticCodes.localPath;
@@ -97,6 +134,9 @@ export function detectCode(text: string): string | undefined {
     if (t.includes('<picture') && t.includes('<source')) {
         return AdwayDiagnosticCodes.picture;
     }
+    if (t.includes('<link') && (t.includes('вне <head') || t.includes('вне &lt;head') || t.includes('перенесите в head'))) {
+        return AdwayDiagnosticCodes.linkOutsideHead;
+    }
     return undefined;
 }
 
@@ -120,10 +160,14 @@ export function getFixesForCode(code: string | undefined): ResultFixAction[] {
         case AdwayDiagnosticCodes.scroll:
             return [
                 { label: 'Вставить скрипт прокрутки', command: 'adway.insertScroll' },
-                { label: 'Добавить id="oneform"', command: 'adway.addOneform' }
+                { label: 'Добавить id="oneform" к форме', command: 'adway.addOneform' },
+                { label: 'Вставить <span id="oneform">', command: 'adway.insertOneformSpan' }
             ];
         case AdwayDiagnosticCodes.oneform:
-            return [{ label: 'Добавить id="oneform"', command: 'adway.addOneform' }];
+            return [
+                { label: 'Добавить id="oneform" к форме', command: 'adway.addOneform' },
+                { label: 'Вставить <span id="oneform">', command: 'adway.insertOneformSpan' }
+            ];
         case AdwayDiagnosticCodes.validationMissing:
             return [
                 { label: 'Вставить валидаторы', command: 'adway.insertValidation' },
@@ -157,10 +201,15 @@ export function getFixesForCode(code: string | undefined): ResultFixAction[] {
             ];
         case AdwayDiagnosticCodes.picture:
             return [{ label: 'Убрать <source> из <picture>', command: 'adway.flattenPicture' }];
+        case AdwayDiagnosticCodes.linkOutsideHead:
+            return [
+                { label: 'Перенести <link> в <head>', command: 'adway.moveLinksToHead' },
+                { label: 'Почистить лендинг', command: 'adway.cleanupLanding' }
+            ];
         case AdwayDiagnosticCodes.localPath:
             return [
-                { label: 'Исправить путь (images/css/js)', command: 'adway.fixLocalPath' },
-                { label: 'Исправить все пути', command: 'adway.fixAllLocalPaths' }
+                { label: 'Исправить путь (HTML + CSS url)', command: 'adway.fixLocalPath' },
+                { label: 'Исправить все пути (HTML + CSS)', command: 'adway.fixAllLocalPaths' }
             ];
         case AdwayDiagnosticCodes.externalImage:
             return [
@@ -170,6 +219,24 @@ export function getFixesForCode(code: string | undefined): ResultFixAction[] {
         case AdwayDiagnosticCodes.externalCss:
         case AdwayDiagnosticCodes.externalJs:
             return [];
+        case AdwayDiagnosticCodes.scriptUnconnected:
+            return [
+                { label: 'Подключить скрипт в HTML', command: 'adway.connectScriptFile' },
+                { label: 'Удалить неподключённый файл', command: 'adway.deleteUnconnectedScript' }
+            ];
+        case AdwayDiagnosticCodes.scriptMissing:
+            return [
+                { label: 'Удалить тег <script src>', command: 'adway.removeMissingScriptTag' },
+                { label: 'Исправить путь', command: 'adway.fixLocalPath' }
+            ];
+        case AdwayDiagnosticCodes.videoHermes:
+        case AdwayDiagnosticCodes.videoVideojs:
+        case AdwayDiagnosticCodes.videoBlob:
+        case AdwayDiagnosticCodes.videoCss:
+        case AdwayDiagnosticCodes.videoJs:
+        case AdwayDiagnosticCodes.videoMediaPath:
+        case AdwayDiagnosticCodes.videoFormInside:
+            return [{ label: 'Установить Adway видео-плеер (бесплатный)', command: 'adway.setupVideoPlayer' }];
         default:
             return [];
     }

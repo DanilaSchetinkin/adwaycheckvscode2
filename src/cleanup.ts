@@ -1,5 +1,5 @@
 /**
- * Cleanup лендинга: target, picture→img, normalize href, комментарии.
+ * Cleanup лендинга: target, picture→img, normalize href, комментарии, link→head.
  */
 
 import { normalizeAnchorHrefs } from './normalizeHrefs';
@@ -9,6 +9,8 @@ export type CleanupOptions = {
     removePictureSource?: boolean;
     normalizeHrefs?: boolean;
     removeComments?: boolean;
+    /** Перенести <link> из body (и вне head) в </head> */
+    moveLinksToHead?: boolean;
 };
 
 export type CleanupResult = {
@@ -17,6 +19,7 @@ export type CleanupResult = {
     flattenedPictures: number;
     replacedHrefs: number;
     removedComments: number;
+    movedLinks: number;
 };
 
 /** Удаляет атрибут target="…" / target='…' со всех тегов. */
@@ -60,10 +63,89 @@ export function removeHtmlComments(html: string): { html: string; removed: numbe
         return '';
     });
     if (removed > 0) {
-        // убрать лишние пустые строки после вырезания
         next = next.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
     }
     return { html: next, removed };
+}
+
+function findHeadRange(html: string): { start: number; end: number } | null {
+    const headOpen = html.match(/<head\b[^>]*>/i);
+    const headCloseIdx = html.search(/<\/head>/i);
+    if (!headOpen || headOpen.index === undefined || headCloseIdx < 0) {
+        return null;
+    }
+    return {
+        start: headOpen.index + headOpen[0].length,
+        end: headCloseIdx
+    };
+}
+
+/** Сколько <link> стоят вне <head>. */
+export function countLinksOutsideHead(html: string): number {
+    const head = findHeadRange(html);
+    const linkRe = /<link\b[^>]*\/?>/gi;
+    let n = 0;
+    let m: RegExpExecArray | null;
+    while ((m = linkRe.exec(html)) !== null) {
+        const start = m.index;
+        const end = start + m[0].length;
+        const insideHead = head !== null && start >= head.start && end <= head.end;
+        if (!insideHead) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/**
+ * Все <link …> вне <head> переносит перед </head>.
+ * Порядок сохранён. Если <head> нет — создаёт минимальный перед <body> / в начале.
+ */
+export function moveLinksToHead(html: string): { html: string; moved: number } {
+    const head = findHeadRange(html);
+    const linkRe = /<link\b[^>]*\/?>/gi;
+    const ranges: Array<{ start: number; end: number; tag: string }> = [];
+    let m: RegExpExecArray | null;
+
+    while ((m = linkRe.exec(html)) !== null) {
+        const start = m.index;
+        const end = start + m[0].length;
+        const insideHead = head !== null && start >= head.start && end <= head.end;
+        if (insideHead) {
+            continue;
+        }
+        ranges.push({ start, end, tag: m[0] });
+    }
+
+    if (ranges.length === 0) {
+        return { html, moved: 0 };
+    }
+
+    const toMove = ranges.map(r => r.tag);
+    let next = html;
+    for (let i = ranges.length - 1; i >= 0; i--) {
+        const r = ranges[i];
+        let cutEnd = r.end;
+        if (next[cutEnd] === '\r') {
+            cutEnd += 1;
+        }
+        if (next[cutEnd] === '\n') {
+            cutEnd += 1;
+        }
+        next = next.slice(0, r.start) + next.slice(cutEnd);
+    }
+
+    const block = toMove.map(t => `  ${t}`).join('\n') + '\n';
+
+    if (/<\/head>/i.test(next)) {
+        next = next.replace(/<\/head>/i, `${block}</head>`);
+    } else if (/<body\b/i.test(next)) {
+        next = next.replace(/<body\b/i, `<head>\n${block}</head>\n<body`);
+    } else {
+        next = `<head>\n${block}</head>\n` + next;
+    }
+
+    return { html: next, moved: toMove.length };
 }
 
 export function cleanupLanding(html: string, options: CleanupOptions = {}): CleanupResult {
@@ -71,7 +153,8 @@ export function cleanupLanding(html: string, options: CleanupOptions = {}): Clea
         removeTarget = true,
         removePictureSource = true,
         normalizeHrefs = true,
-        removeComments = false
+        removeComments = false,
+        moveLinksToHead: doMoveLinks = true
     } = options;
 
     let current = html;
@@ -79,6 +162,7 @@ export function cleanupLanding(html: string, options: CleanupOptions = {}): Clea
     let flattenedPictures = 0;
     let replacedHrefs = 0;
     let removedComments = 0;
+    let movedLinks = 0;
 
     if (removeComments) {
         const r = removeHtmlComments(current);
@@ -104,11 +188,18 @@ export function cleanupLanding(html: string, options: CleanupOptions = {}): Clea
         replacedHrefs = r.replaced;
     }
 
+    if (doMoveLinks) {
+        const r = moveLinksToHead(current);
+        current = r.html;
+        movedLinks = r.moved;
+    }
+
     return {
         html: current,
         removedTargets,
         flattenedPictures,
         replacedHrefs,
-        removedComments
+        removedComments,
+        movedLinks
     };
 }

@@ -1,7 +1,7 @@
 {
   "name": "adway-checker-vscode",
   "displayName": "Adway Checker",
-  "description": "Проверка лендингов на соответствие требованиям Adway",
+  "description": "Проверка лендингов Adway: формы, пути, скрипты, бесплатный локальный видео-плеер",
   "version": "1.0.0",
   "publisher": "adway",
   "engines": {
@@ -80,6 +80,11 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "adway.moveLinksToHead",
+        "title": "Adway: Перенести <link> в <head>",
+        "icon": "$(arrow-up)"
+      },
+      {
         "command": "adway.focusResultsTree",
         "title": "Adway: Показать панель результатов",
         "icon": "$(list-tree)"
@@ -146,8 +151,53 @@
       },
       {
         "command": "adway.addOneform",
-        "title": "Adway: Добавить id=\"oneform\"",
+        "title": "Adway: Добавить id=\"oneform\" к форме",
         "icon": "$(symbol-key)"
+      },
+      {
+        "command": "adway.insertOneformSpan",
+        "title": "Adway: Вставить <span id=\"oneform\">",
+        "icon": "$(symbol-ruler)"
+      },
+      {
+        "command": "adway.connectScriptFile",
+        "title": "Adway: Подключить скрипт из js/ в HTML",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "adway.deleteUnconnectedScript",
+        "title": "Adway: Удалить неподключённый скрипт",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "adway.removeMissingScriptTag",
+        "title": "Adway: Удалить тег script с битым src",
+        "icon": "$(close)"
+      },
+      {
+        "command": "adway.dedupeImages",
+        "title": "Adway: Удалить дубли (images/css/js)",
+        "icon": "$(group-by-ref-type)"
+      },
+      {
+        "command": "adway.setupVideoPlayer",
+        "title": "Adway: Установить видео-плеер (бесплатный)",
+        "icon": "$(device-camera-video)"
+      },
+      {
+        "command": "adway.insertVideoBlock",
+        "title": "Adway: Вставить блок #container_video",
+        "icon": "$(device-camera-video)"
+      },
+      {
+        "command": "adway.insertVideoCss",
+        "title": "Adway: Записать css/video.css",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "adway.insertVideoJsFile",
+        "title": "Adway: Записать js/video.js",
+        "icon": "$(file-code)"
       },
       {
         "command": "adway.removeComments",
@@ -364,6 +414,31 @@
           "group": "adway_fix@2"
         },
         {
+          "command": "adway.insertOneformSpan",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.oneform' || adwayFixCode == 'adway.scroll')",
+          "group": "adway_fix@3"
+        },
+        {
+          "command": "adway.connectScriptFile",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.script.unconnected'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.deleteUnconnectedScript",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.script.unconnected'",
+          "group": "adway_fix@2"
+        },
+        {
+          "command": "adway.removeMissingScriptTag",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.script.missing' || adwayFixCode == 'adway.localPath')",
+          "group": "adway_fix@3"
+        },
+        {
+          "command": "adway.setupVideoPlayer",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.video.hermes' || adwayFixCode == 'adway.video.videojs' || adwayFixCode == 'adway.video.blob' || adwayFixCode == 'adway.video.css' || adwayFixCode == 'adway.video.js' || adwayFixCode == 'adway.video.mediaPath' || adwayFixCode == 'adway.video.formInside')",
+          "group": "adway_fix@1"
+        },
+        {
           "command": "adway.insertValidation",
           "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.validation.missing' || adwayFixCode == 'adway.validation.old')",
           "group": "adway_fix@1"
@@ -391,6 +466,11 @@
         {
           "command": "adway.removeBase",
           "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.base'",
+          "group": "adway_fix@1"
+        },
+        {
+          "command": "adway.moveLinksToHead",
+          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.linkOutsideHead'",
           "group": "adway_fix@1"
         },
         {
@@ -478,6 +558,10 @@
           "group": "1_form@2"
         },
         {
+          "command": "adway.insertOneformSpan",
+          "group": "1_form@3"
+        },
+        {
           "command": "adway.normalizeHrefs",
           "group": "2_links@1"
         },
@@ -502,36 +586,60 @@
           "group": "3_markup@2"
         },
         {
-          "command": "adway.insertDoctype",
+          "command": "adway.moveLinksToHead",
           "group": "3_markup@3"
         },
         {
-          "command": "adway.removeComments",
+          "command": "adway.insertDoctype",
           "group": "3_markup@4"
         },
         {
-          "command": "adway.downloadExternalImages",
+          "command": "adway.removeComments",
           "group": "3_markup@5"
         },
         {
-          "command": "adway.openExternalImages",
+          "command": "adway.downloadExternalImages",
           "group": "3_markup@6"
         },
         {
-          "command": "adway.fixValidationName",
+          "command": "adway.openExternalImages",
+          "group": "3_markup@7"
+        },
+        {
+          "command": "adway.dedupeImages",
+          "group": "3_markup@8"
+        },
+        {
+          "command": "adway.setupVideoPlayer",
+          "group": "3_markup@9"
+        },
+        {
+          "command": "adway.connectScriptFile",
           "group": "4_scripts@1"
         },
         {
-          "command": "adway.insertLazy",
+          "command": "adway.deleteUnconnectedScript",
           "group": "4_scripts@2"
         },
         {
-          "command": "adway.insertScroll",
+          "command": "adway.removeMissingScriptTag",
           "group": "4_scripts@3"
         },
         {
-          "command": "adway.insertValidation",
+          "command": "adway.fixValidationName",
           "group": "4_scripts@4"
+        },
+        {
+          "command": "adway.insertLazy",
+          "group": "4_scripts@5"
+        },
+        {
+          "command": "adway.insertScroll",
+          "group": "4_scripts@6"
+        },
+        {
+          "command": "adway.insertValidation",
+          "group": "4_scripts@7"
         }
       ],
       "adway.insertMenu": [
@@ -552,8 +660,12 @@
           "group": "1_basic@4"
         },
         {
-          "command": "adway.insertValidation",
+          "command": "adway.insertOneformSpan",
           "group": "1_basic@5"
+        },
+        {
+          "command": "adway.insertValidation",
+          "group": "1_basic@6"
         },
         {
           "command": "adway.insertHiddenInputs",
@@ -572,8 +684,24 @@
           "group": "3_other@1"
         },
         {
-          "command": "adway.insertVideoScript",
+          "command": "adway.insertVideoBlock",
           "group": "3_other@2"
+        },
+        {
+          "command": "adway.insertVideoCss",
+          "group": "3_other@3"
+        },
+        {
+          "command": "adway.insertVideoJsFile",
+          "group": "3_other@4"
+        },
+        {
+          "command": "adway.insertVideoScript",
+          "group": "3_other@5"
+        },
+        {
+          "command": "adway.setupVideoPlayer",
+          "group": "3_other@6"
         }
       ]
     },

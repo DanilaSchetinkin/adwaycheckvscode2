@@ -2,3 +2,6 @@ out/
 node_modules/
 *.vsix
 .vscode-test/
+# sample landings / accidental folders (not part of the extension)
+video/
+media/

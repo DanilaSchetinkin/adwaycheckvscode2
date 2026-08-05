@@ -5,6 +5,7 @@ import {
     FORM_SNIPPET,
     HIDDEN_INPUTS,
     JQUERY_SNIPPET,
+    ONEFORM_SPAN,
     REQUIRED_SCRIPTS,
     TIMER_SNIPPET,
     VIDEO_SNIPPET,
@@ -60,6 +61,10 @@ export class SnippetProvider {
         await this.insertText(VIEWPORT_VIETNAM);
     }
 
+    async insertOneformSpan() {
+        await this.insertText(ONEFORM_SPAN);
+    }
+
     async insertTimer() {
         await this.insertText(TIMER_SNIPPET);
     }
@@ -68,6 +73,7 @@ export class SnippetProvider {
         const items = [
             { label: '$(file-code) jQuery 3.6.0', description: 'Вставить jQuery скрипт', value: 'jquery' },
             { label: '$(file-code) Обязательные скрипты', description: 'Lazy loading, scroll, validation', value: 'scripts' },
+            { label: '$(symbol-ruler) <span id="oneform">', description: 'Якорь для скрипта прокрутки', value: 'oneform' },
             { label: '$(file-code) Скрытые инпуты', description: 'fbpx, utm_code, cid, sid, hash, country', value: 'hidden' },
             { label: '$(file-code) Полная форма', description: 'Форма с инпутами и кнопкой', value: 'form' },
             { label: '$(calendar) Дата', description: 'Скрипт для вывода даты', value: 'date' },
@@ -90,6 +96,9 @@ export class SnippetProvider {
                 break;
             case 'scripts':
                 await this.insertScripts();
+                break;
+            case 'oneform':
+                await this.insertOneformSpan();
                 break;
             case 'hidden':
                 await this.insertHiddenInputs();

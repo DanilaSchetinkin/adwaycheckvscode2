@@ -7,7 +7,9 @@ const KEEP_DIRS = new Set([
     'images',
     'css',
     'js',
+    'media', // не трогаем; создаём только если есть видео
     'other',
+    'scripts', // временно: содержимое уйдёт в js/, папку удалим
     '.git',
     '.svn',
     '.hg',
@@ -20,6 +22,7 @@ const KEEP_DIRS = new Set([
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif']);
 const CSS_EXT = new Set(['.css']);
 const JS_EXT = new Set(['.js', '.mjs', '.cjs']);
+export const VIDEO_EXT = new Set(['.mp4', '.webm', '.ogg', '.mov', '.m4v', '.avi', '.mkv']);
 const HTML_EXT = new Set(['.html', '.htm']);
 
 const INDEX_HTML_TEMPLATE = `<!DOCTYPE html>
@@ -47,7 +50,7 @@ export interface StructureResult {
     skipped: string[];
 }
 
-type FileBucket = 'images' | 'css' | 'js' | 'other' | 'html';
+type FileBucket = 'images' | 'css' | 'js' | 'media' | 'other' | 'html';
 
 function extOf(name: string): string {
     return path.extname(name).toLowerCase();
@@ -66,6 +69,9 @@ function classifyFile(name: string): FileBucket {
     }
     if (JS_EXT.has(ext)) {
         return 'js';
+    }
+    if (VIDEO_EXT.has(ext)) {
+        return 'media';
     }
     return 'other';
 }
@@ -320,18 +326,23 @@ async function promoteMainHtml(
 }
 
 /**
- * Раскладывает файлы из корня и из other/ по images/css/js/other.
+ * Раскладывает файлы из корня и из other/ по images/css/js/media/other.
+ * Папка scripts/ → содержимое в js/, пустую scripts/ удаляет.
  */
 async function redistributeAssets(
     root: vscode.Uri,
     moved: string[],
     skipped: string[],
-    pathMap: Map<string, string>
+    pathMap: Map<string, string>,
+    created: string[]
 ): Promise<void> {
     const imagesDir = vscode.Uri.joinPath(root, 'images');
     const cssDir = vscode.Uri.joinPath(root, 'css');
     const jsDir = vscode.Uri.joinPath(root, 'js');
+    const mediaDir = vscode.Uri.joinPath(root, 'media');
     const otherDir = vscode.Uri.joinPath(root, 'other');
+
+    await migrateScriptsFolder(root, jsDir, moved, skipped, pathMap);
 
     type Item = { name: string; uri: vscode.Uri; source: 'root' | 'other' };
     const items: Item[] = [];
@@ -342,12 +353,11 @@ async function redistributeAssets(
             continue;
         }
         if (type === vscode.FileType.Directory) {
-            // неизвестная папка → other
             await moveFile(vscode.Uri.joinPath(root, name), otherDir, 'other', name, moved, skipped);
             continue;
         }
         if (HTML_EXT.has(extOf(name))) {
-            continue; // HTML уже обработан
+            continue;
         }
         items.push({ name, uri: vscode.Uri.joinPath(root, name), source: 'root' });
     }
@@ -359,11 +369,11 @@ async function redistributeAssets(
                 continue;
             }
             if (HTML_EXT.has(extOf(name))) {
-                continue; // лишние html остаются в other
+                continue;
             }
             const bucket = classifyFile(name);
             if (bucket === 'other') {
-                continue; // уже на месте
+                continue;
             }
             items.push({ name, uri: vscode.Uri.joinPath(otherDir, name), source: 'other' });
         }
@@ -383,8 +393,66 @@ async function redistributeAssets(
             }
             continue;
         }
-        const destDir = bucket === 'images' ? imagesDir : bucket === 'css' ? cssDir : jsDir;
+        if (bucket === 'media') {
+            // папка media/ только если реально есть видео
+            await ensureDir(root, 'media', created);
+            await moveFile(item.uri, mediaDir, 'media', item.name, moved, skipped, pathMap);
+            continue;
+        }
+        const destDir =
+            bucket === 'images' ? imagesDir : bucket === 'css' ? cssDir : jsDir;
         await moveFile(item.uri, destDir, bucket, item.name, moved, skipped, pathMap);
+    }
+}
+
+/** scripts/*.js → js/, затем удалить пустую scripts/ */
+async function migrateScriptsFolder(
+    root: vscode.Uri,
+    jsDir: vscode.Uri,
+    moved: string[],
+    skipped: string[],
+    pathMap: Map<string, string>
+): Promise<void> {
+    const scriptsDir = vscode.Uri.joinPath(root, 'scripts');
+    if (!(await exists(scriptsDir))) {
+        return;
+    }
+
+    let entries: [string, vscode.FileType][];
+    try {
+        entries = await vscode.workspace.fs.readDirectory(scriptsDir);
+    } catch {
+        return;
+    }
+
+    for (const [name, type] of entries) {
+        const from = vscode.Uri.joinPath(scriptsDir, name);
+        if (type === vscode.FileType.Directory) {
+            // вложенные папки scripts — в other/scripts_…
+            const otherDir = vscode.Uri.joinPath(root, 'other');
+            await moveFile(from, otherDir, 'other', `scripts_${name}`, moved, skipped);
+            continue;
+        }
+        if (JS_EXT.has(extOf(name))) {
+            await moveFile(from, jsDir, 'js', name, moved, skipped, pathMap);
+            // старые пути scripts/foo.js → js/foo.js
+            pathMap.set(`scripts/${name}`, `js/${name}`);
+            pathMap.set(name, `js/${name}`);
+        } else {
+            const otherDir = vscode.Uri.joinPath(root, 'other');
+            await moveFile(from, otherDir, 'other', name, moved, skipped);
+        }
+    }
+
+    // удалить scripts/, если пусто
+    try {
+        const left = await vscode.workspace.fs.readDirectory(scriptsDir);
+        if (left.length === 0) {
+            await vscode.workspace.fs.delete(scriptsDir, { recursive: false, useTrash: false });
+            moved.push('scripts/ (удалена пустая папка)');
+        }
+    } catch {
+        // ignore
     }
 }
 
@@ -441,8 +509,8 @@ export async function applyProjectStructure(root: vscode.Uri): Promise<Structure
     // 1) HTML → index.html (ищет и в корне, и в other/)
     await promoteMainHtml(root, moved, renamed, skipped, created);
 
-    // 2) Картинки/css/js из корня и other/
-    await redistributeAssets(root, moved, skipped, pathMap);
+    // 2) Картинки/css/js/видео из корня и other/ (media/ — только если есть видео)
+    await redistributeAssets(root, moved, skipped, pathMap, created);
 
     // Папки css/ и js/ уже созданы выше — пустые style.css / main.js не создаём
 
@@ -476,7 +544,8 @@ export async function initProjectStructureCommand(): Promise<void> {
             `• основной HTML → index.html (в т.ч. из other/)\n` +
             `• картинки → images/\n` +
             `• стили → css/\n` +
-            `• скрипты → js/\n` +
+            `• скрипты → js/ (в т.ч. из scripts/)\n` +
+            `• видео → media/ (папка создаётся только если есть видео)\n` +
             `• остальное → other/\n\n` +
             `Закройте открытые файлы лендинга перед продолжением.`,
         { modal: true },

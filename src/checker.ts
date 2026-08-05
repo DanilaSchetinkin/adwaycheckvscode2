@@ -2,6 +2,9 @@ import { JSDOM } from 'jsdom';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { findMissingLocalPaths } from './filePaths';
+import { countLinksOutsideHead } from './cleanup';
+import { checkScriptAssets } from './scriptAssets';
+import { detectVideoLandingIssues } from './videoPlayer';
 import { readSheetsConfig, validateSidCountry } from './sheets';
 import { checkUnusedScripts } from './unusedScripts';
 
@@ -1188,25 +1191,89 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
             }
         }
 
+        {
+            const outside = countLinksOutsideHead(html);
+            if (outside > 0) {
+                push(
+                    results,
+                    'warning',
+                    `⚠️ Найдено <span class="value-highlight">${outside}</span> тег(ов) &lt;link&gt; вне &lt;head&gt; — перенесите в head`,
+                    html,
+                    '<link'
+                );
+            }
+        }
+
         if (options.checkLocalPaths !== false && options.htmlDir) {
+            const scriptIssues = checkScriptAssets(html, options.htmlDir);
+            const missingScriptKeys = new Set(
+                scriptIssues
+                    .filter(i => i.kind === 'missing')
+                    .map(i => i.path.replace(/^\.\//, '').toLowerCase())
+            );
+
             for (const issue of findMissingLocalPaths(html, options.htmlDir)) {
+                if (missingScriptKeys.has(issue.url.replace(/^\.\//, '').toLowerCase())) {
+                    continue;
+                }
+                const inCss = issue.cssFile
+                    ? ` в <span class="value-highlight">${escapeHtml(issue.cssFile)}</span>`
+                    : '';
                 if (issue.suggestedUrl) {
                     push(
                         results,
                         false,
-                        `❌ Неверный путь: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> — файл найден как <span class="value-highlight">"${escapeHtml(issue.suggestedUrl)}"</span>`,
+                        `❌ Неверный путь${inCss}: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> — файл найден как <span class="value-highlight">"${escapeHtml(issue.suggestedUrl)}"</span>`,
                         html,
-                        issue.search
+                        issue.cssFile ? issue.cssFile : issue.search
                     );
                 } else {
                     push(
                         results,
                         false,
-                        `❌ Файл не найден: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> (искали также в images/, css/, js/)`,
+                        `❌ Файл не найден${inCss}: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> (искали в корне, images/, css/, js/, media/ и вложенных)`,
                         html,
-                        issue.search
+                        issue.cssFile ? issue.cssFile : issue.search
                     );
                 }
+            }
+
+            for (const issue of scriptIssues) {
+                if (issue.kind === 'unconnected') {
+                    push(
+                        results,
+                        'warning',
+                        `⚠️ Скрипт не подключён в HTML: <span class="value-highlight">"${escapeHtml(issue.path)}"</span> — добавьте &lt;script src&gt; или удалите файл`,
+                        html,
+                        'script'
+                    );
+                } else {
+                    push(
+                        results,
+                        false,
+                        `❌ Скрипт не найден: <span class="value-highlight">"${escapeHtml(issue.path)}"</span> — удалите тег или положите файл`,
+                        html,
+                        issue.search || issue.path
+                    );
+                }
+            }
+        }
+
+        if (options.htmlDir) {
+            for (const issue of detectVideoLandingIssues(html, options.htmlDir)) {
+                push(
+                    results,
+                    issue.severity === 'warning' ? 'warning' : false,
+                    issue.message,
+                    html,
+                    issue.code.includes('hermes')
+                        ? 'embedpvideo'
+                        : issue.code.includes('videojs')
+                          ? 'video-js'
+                          : issue.code.includes('media')
+                            ? '.mp4'
+                            : 'video'
+                );
             }
         }
 

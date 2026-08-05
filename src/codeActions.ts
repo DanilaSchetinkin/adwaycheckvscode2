@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { findFormRanges } from './checker';
 import { cleanupLanding, flattenPictureSources, removeHtmlComments, removeTargetAttributes } from './cleanup';
 import { AdwayDiagnosticCodes } from './diagnostics';
-import { findMissingLocalPaths } from './filePaths';
+import { findMissingLocalPaths, fixCssLocalPaths } from './filePaths';
 import { normalizeAnchorHrefs } from './normalizeHrefs';
 import {
     FORM_SNIPPET,
@@ -176,7 +176,9 @@ function insertAfterOpenTag(document: vscode.TextDocument, openTagRe: RegExp, te
     }
     const pos = document.positionAt(match.index + match[0].length);
     const edit = new vscode.WorkspaceEdit();
-    edit.insert(document.uri, pos, '\n' + text + '\n');
+    // всегда с новой строки, чтобы не прилипало к <html>/<head>…
+    const chunk = text.trim();
+    edit.insert(document.uri, pos, `\n  ${chunk}\n`);
     return edit;
 }
 
@@ -188,7 +190,10 @@ function insertBeforeCloseTag(document: vscode.TextDocument, closeTag: string, t
     }
     const pos = document.positionAt(idx);
     const edit = new vscode.WorkspaceEdit();
-    edit.insert(document.uri, pos, text + '\n');
+    const chunk = text.trim();
+    // перевод строки до и после — не в одну строку с соседним тегом
+    const needNlBefore = idx > 0 && html[idx - 1] !== '\n';
+    edit.insert(document.uri, pos, `${needNlBefore ? '\n' : ''}  ${chunk}\n`);
     return edit;
 }
 
@@ -323,19 +328,131 @@ function fixLocalPathOnLine(document: vscode.TextDocument, line: number): vscode
         line + 1 < document.lineCount
             ? document.offsetAt(new vscode.Position(line + 1, 0))
             : html.length;
+    const lineText = document.lineAt(Math.min(line, document.lineCount - 1)).text;
 
+    // строка с link на css — чиним url() внутри этого CSS
+    const cssFromLine = issues.find(
+        i =>
+            i.cssFile &&
+            (lineText.includes(i.cssFile) ||
+                lineText.toLowerCase().includes(path.basename(i.cssFile).toLowerCase()))
+    );
+    if (cssFromLine?.cssFile) {
+        const only = findMissingLocalPaths(html, htmlDir).filter(
+            i => i.cssFile === cssFromLine.cssFile && i.suggestedUrl
+        );
+        // временно: fixCssLocalPaths правит все CSS — ок для одной команды
+        const r = fixCssLocalPaths(html, htmlDir);
+        if (r.fixed > 0) {
+            // HTML не менялся — вернём пустой replace той же строки как сигнал успеха? 
+            // Лучше null и пусть extension вызывает fixCss — для buildFixEdit вернём no-op
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                document.uri,
+                new vscode.Range(line, 0, line, lineText.length),
+                lineText
+            );
+            return edit;
+        }
+        if (only.length === 0) {
+            return null;
+        }
+    }
+
+    const htmlIssues = issues.filter(i => !i.cssFile);
     const onLine =
-        issues.find(i => {
+        htmlIssues.find(i => {
             const idx = html.indexOf(i.search);
             return idx >= lineStart && idx < lineEnd;
         }) ||
-        issues.find(i => {
+        htmlIssues.find(i => {
             const idx = html.indexOf(i.url);
             return idx >= lineStart && idx < lineEnd;
         }) ||
-        issues[0];
+        htmlIssues[0];
+
+    if (!onLine) {
+        // только CSS-проблемы — поправить все CSS
+        const r = fixCssLocalPaths(html, htmlDir);
+        if (r.fixed === 0) {
+            return null;
+        }
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(
+            document.uri,
+            new vscode.Range(line, 0, line, lineText.length),
+            lineText
+        );
+        return edit;
+    }
 
     return applyLocalPathFix(document, html, onLine);
+}
+
+/** Исправить все пути в HTML + url() в CSS. */
+export function fixAllLocalPathsWithCss(document: vscode.TextDocument): {
+    edit: vscode.WorkspaceEdit | null;
+    cssFixed: number;
+    cssFiles: string[];
+} {
+    if (document.uri.scheme !== 'file') {
+        return { edit: null, cssFixed: 0, cssFiles: [] };
+    }
+    const html = document.getText();
+    const htmlDir = path.dirname(document.uri.fsPath);
+    const cssFix = fixCssLocalPaths(html, htmlDir);
+
+    const issues = findMissingLocalPaths(html, htmlDir).filter(i => i.suggestedUrl && !i.cssFile);
+    if (issues.length === 0) {
+        return { edit: null, cssFixed: cssFix.fixed, cssFiles: cssFix.files };
+    }
+
+    const sorted = [...issues].sort((a, b) => html.lastIndexOf(a.search) - html.lastIndexOf(b.search));
+    let current = html;
+    let changed = false;
+    for (const issue of sorted) {
+        if (!issue.suggestedUrl) {
+            continue;
+        }
+        const quoteMatch = issue.search.match(/^(src|href|srcset|poster|data)\s*=\s*(["'])([\s\S]*)\2$/i);
+        if (quoteMatch) {
+            const attr = quoteMatch[1];
+            const q = quoteMatch[2];
+            const value = quoteMatch[3];
+            const nextAttr =
+                /^srcset$/i.test(attr) && value.includes(issue.url)
+                    ? `${attr}=${q}${value.replace(issue.url, issue.suggestedUrl)}${q}`
+                    : `${attr}=${q}${issue.suggestedUrl}${q}`;
+            if (current.includes(issue.search)) {
+                current = current.replace(issue.search, nextAttr);
+                changed = true;
+                continue;
+            }
+        }
+        if (issue.search.startsWith('url(') && current.includes(issue.search)) {
+            current = current.replace(
+                issue.search,
+                issue.search.replace(issue.url, issue.suggestedUrl)
+            );
+            changed = true;
+            continue;
+        }
+        if (current.includes(issue.url)) {
+            current = current.replace(issue.url, issue.suggestedUrl);
+            changed = true;
+        }
+    }
+
+    return {
+        edit: changed && current !== html ? replaceFullDocument(document, current) : null,
+        cssFixed: cssFix.fixed,
+        cssFiles: cssFix.files
+    };
+}
+
+/** Обратная совместимость: только WorkspaceEdit для HTML (CSS чинится через WithCss). */
+export function fixAllLocalPaths(document: vscode.TextDocument): vscode.WorkspaceEdit | null {
+    return fixAllLocalPathsWithCss(document).edit;
 }
 
 function applyLocalPathFix(
@@ -347,7 +464,7 @@ function applyLocalPathFix(
         return null;
     }
 
-    const quoteMatch = issue.search.match(/^(src|href|srcset)\s*=\s*(["'])([\s\S]*)\2$/i);
+    const quoteMatch = issue.search.match(/^(src|href|srcset|poster|data)\s*=\s*(["'])([\s\S]*)\2$/i);
     let nextAttr: string | null = null;
     if (quoteMatch) {
         const attr = quoteMatch[1];
@@ -387,51 +504,6 @@ function applyLocalPathFix(
     return null;
 }
 
-/** Исправить все пути, для которых есть файл в images/css/js. */
-export function fixAllLocalPaths(document: vscode.TextDocument): vscode.WorkspaceEdit | null {
-    if (document.uri.scheme !== 'file') {
-        return null;
-    }
-    const html = document.getText();
-    const htmlDir = path.dirname(document.uri.fsPath);
-    const issues = findMissingLocalPaths(html, htmlDir).filter(i => i.suggestedUrl);
-    if (issues.length === 0) {
-        return null;
-    }
-
-    // С конца файла, чтобы оффсеты не плыли
-    const sorted = [...issues].sort((a, b) => html.lastIndexOf(a.search) - html.lastIndexOf(b.search));
-    let current = html;
-    let changed = false;
-    for (const issue of sorted) {
-        if (!issue.suggestedUrl) {
-            continue;
-        }
-        const quoteMatch = issue.search.match(/^(src|href|srcset)\s*=\s*(["'])([\s\S]*)\2$/i);
-        if (quoteMatch) {
-            const attr = quoteMatch[1];
-            const q = quoteMatch[2];
-            const value = quoteMatch[3];
-            const nextAttr = /^srcset$/i.test(attr) && value.includes(issue.url)
-                ? `${attr}=${q}${value.replace(issue.url, issue.suggestedUrl)}${q}`
-                : `${attr}=${q}${issue.suggestedUrl}${q}`;
-            if (current.includes(issue.search)) {
-                current = current.replace(issue.search, nextAttr);
-                changed = true;
-                continue;
-            }
-        }
-        if (current.includes(issue.url)) {
-            current = current.replace(issue.url, issue.suggestedUrl);
-            changed = true;
-        }
-    }
-    if (!changed || current === html) {
-        return null;
-    }
-    return replaceFullDocument(document, current);
-}
-
 /** Строит WorkspaceEdit для fixId. */
 export function buildFixEdit(
     document: vscode.TextDocument,
@@ -443,6 +515,7 @@ export function buildFixEdit(
             return (
                 insertAfterOpenTag(document, /<head\b[^>]*>/i, JQUERY_SNIPPET) ||
                 insertBeforeCloseTag(document, '</head>', JQUERY_SNIPPET) ||
+                insertAfterOpenTag(document, /<html\b[^>]*>/i, JQUERY_SNIPPET) ||
                 insertAtLine(document, line, JQUERY_SNIPPET)
             );
         case 'lazy':
@@ -565,12 +638,14 @@ export function buildFixEdit(
                 removeTarget: true,
                 removePictureSource: config.get<boolean>('cleanup.removePictureSource', true),
                 normalizeHrefs: true,
-                removeComments: false
+                removeComments: false,
+                moveLinksToHead: true
             });
             if (
                 result.removedTargets === 0 &&
                 result.flattenedPictures === 0 &&
-                result.replacedHrefs === 0
+                result.replacedHrefs === 0 &&
+                result.movedLinks === 0
             ) {
                 return null;
             }
@@ -640,6 +715,18 @@ export class AdwayCodeActionProvider implements vscode.CodeActionProvider {
                     break;
                 case AdwayDiagnosticCodes.scroll:
                     actions.push(createCommandAction('Adway: Вставить скрипт прокрутки к #oneform', diagnostic, document, 'scroll'));
+                    {
+                        const span = new vscode.CodeAction(
+                            'Adway: Вставить <span id="oneform"></span>',
+                            vscode.CodeActionKind.QuickFix
+                        );
+                        span.diagnostics = [diagnostic];
+                        span.command = {
+                            command: 'adway.insertOneformSpan',
+                            title: 'Вставить span oneform'
+                        };
+                        actions.push(span);
+                    }
                     break;
                 case AdwayDiagnosticCodes.validationMissing:
                     actions.push(createCommandAction('Adway: Вставить валидаторы имени/телефона', diagnostic, document, 'validation'));
@@ -706,6 +793,18 @@ export class AdwayCodeActionProvider implements vscode.CodeActionProvider {
                         'fixForm'
                     ));
                     actions.push(createCommandAction('Adway: Добавить id="oneform" к форме', diagnostic, document, 'oneform', false));
+                    {
+                        const span = new vscode.CodeAction(
+                            'Adway: Вставить <span id="oneform"></span>',
+                            vscode.CodeActionKind.QuickFix
+                        );
+                        span.diagnostics = [diagnostic];
+                        span.command = {
+                            command: 'adway.insertOneformSpan',
+                            title: 'Вставить span oneform'
+                        };
+                        actions.push(span);
+                    }
                     break;
                 case AdwayDiagnosticCodes.base:
                     actions.push(createCommandAction('Adway: Удалить тег <base>', diagnostic, document, 'base'));
@@ -731,14 +830,93 @@ export class AdwayCodeActionProvider implements vscode.CodeActionProvider {
                 case AdwayDiagnosticCodes.picture:
                     actions.push(createCommandAction('Adway: Убрать <source> из <picture>', diagnostic, document, 'flattenPicture'));
                     break;
+                case AdwayDiagnosticCodes.linkOutsideHead: {
+                    const move = new vscode.CodeAction(
+                        'Adway: Перенести <link> в <head>',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    move.diagnostics = [diagnostic];
+                    move.isPreferred = true;
+                    move.command = {
+                        command: 'adway.moveLinksToHead',
+                        title: 'Перенести link в head'
+                    };
+                    actions.push(move);
+                    break;
+                }
                 case AdwayDiagnosticCodes.localPath:
                     actions.push(createCommandAction(
-                        'Adway: Исправить путь на images/css/js',
+                        'Adway: Исправить путь (images/css/js/media)',
                         diagnostic,
                         document,
                         'fixLocalPath'
                     ));
                     break;
+                case AdwayDiagnosticCodes.scriptUnconnected: {
+                    const connect = new vscode.CodeAction(
+                        'Adway: Подключить скрипт в HTML',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    connect.diagnostics = [diagnostic];
+                    connect.isPreferred = true;
+                    connect.command = {
+                        command: 'adway.connectScriptFile',
+                        title: 'Подключить скрипт'
+                    };
+                    actions.push(connect);
+                    const del = new vscode.CodeAction(
+                        'Adway: Удалить неподключённый файл',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    del.diagnostics = [diagnostic];
+                    del.command = {
+                        command: 'adway.deleteUnconnectedScript',
+                        title: 'Удалить скрипт'
+                    };
+                    actions.push(del);
+                    break;
+                }
+                case AdwayDiagnosticCodes.scriptMissing: {
+                    const remove = new vscode.CodeAction(
+                        'Adway: Удалить тег <script src>',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    remove.diagnostics = [diagnostic];
+                    remove.isPreferred = true;
+                    remove.command = {
+                        command: 'adway.removeMissingScriptTag',
+                        title: 'Удалить script'
+                    };
+                    actions.push(remove);
+                    actions.push(createCommandAction(
+                        'Adway: Исправить путь',
+                        diagnostic,
+                        document,
+                        'fixLocalPath',
+                        false
+                    ));
+                    break;
+                }
+                case AdwayDiagnosticCodes.videoHermes:
+                case AdwayDiagnosticCodes.videoVideojs:
+                case AdwayDiagnosticCodes.videoBlob:
+                case AdwayDiagnosticCodes.videoCss:
+                case AdwayDiagnosticCodes.videoJs:
+                case AdwayDiagnosticCodes.videoMediaPath:
+                case AdwayDiagnosticCodes.videoFormInside: {
+                    const setup = new vscode.CodeAction(
+                        'Adway: Установить видео-плеер (бесплатный)',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    setup.diagnostics = [diagnostic];
+                    setup.isPreferred = true;
+                    setup.command = {
+                        command: 'adway.setupVideoPlayer',
+                        title: 'Установить видео-плеер (бесплатный)'
+                    };
+                    actions.push(setup);
+                    break;
+                }
                 case AdwayDiagnosticCodes.externalImage: {
                     const action = new vscode.CodeAction(
                         'Adway: Скачать это изображение в images/',

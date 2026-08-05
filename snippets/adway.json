@@ -99,6 +99,45 @@
     ],
     "description": "Полная форма заказа"
   },
+  "oneform span": {
+    "prefix": "adway-oneform",
+    "body": [
+      "<span id=\"oneform\"></span>"
+    ],
+    "description": "Якорь #oneform для скрипта прокрутки"
+  },
+  "Video player block": {
+    "prefix": "adway-video-block",
+    "body": [
+      "<div id=\"container_video\">",
+      "  <div id=\"video-overlay\"></div>",
+      "  <div id=\"close\">",
+      "    <img src=\"images/2.svg\" alt=\"\" loading=\"lazy\">",
+      "  </div>",
+      "  <div id=\"open-video\">",
+      "    <div>",
+      "      <h4>Click to continue</h4>",
+      "    </div>",
+      "  </div>",
+      "  <div id=\"popup\">",
+      "    <div>",
+      "      <h2>Limited stock left.</h2>",
+      "      <h2>Order now!</h2>",
+      "    </div>",
+      "  </div>",
+      "  <div id=\"play\">",
+      "    <div>",
+      "      <h4>The video has already started.</h4>",
+      "      <h4>Click to unmute!</h4>",
+      "    </div>",
+      "  </div>",
+      "  <video id=\"video\" autoplay muted playsinline preload=\"metadata\">",
+      "    <source src=\"media/video.mp4\" type=\"video/mp4\">",
+      "  </video>",
+      "</div>"
+    ],
+    "description": "Adway #container_video + media/video.mp4"
+  },
   "Date Script": {
     "prefix": "adway-date",
     "body": [

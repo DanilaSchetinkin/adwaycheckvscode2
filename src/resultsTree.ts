@@ -49,6 +49,7 @@ export function classifyResultMessage(message: string): ResultGroupId {
         t.includes('внешн') ||
         t.includes('изображен') ||
         t.includes('файл не найден') ||
+        t.includes('неверный путь') ||
         t.includes('<picture') ||
         t.includes('css:') ||
         t.includes(' img ')
@@ -65,6 +66,7 @@ export function classifyResultMessage(message: string): ResultGroupId {
         t.includes('прокрутк') ||
         t.includes('неиспользуем') ||
         t.includes('дублирующ') ||
+        t.includes('не подключ') ||
         t.includes('пустой <script')
     ) {
         return 'scripts';

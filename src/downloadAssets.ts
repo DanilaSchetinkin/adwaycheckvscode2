@@ -359,26 +359,31 @@ function buildLocalFileName(
 }
 
 /**
- * Дубли с одинаковым содержимым в images/ → один файл, остальные удалить.
- * В HTML пути на удалённые имена переписываются на оставшийся.
+ * Дубли с одинаковым содержимым в папке → один файл, остальные удалить.
+ * pathMap: старый относительный путь → новый (folder/name).
  */
-export function dedupeImagesFolder(
-    html: string,
-    htmlDir: string
-): { html: string; removed: string[]; kept: number } {
-    const imagesDir = path.join(htmlDir, 'images');
-    if (!fs.existsSync(imagesDir)) {
-        return { html, removed: [], kept: 0 };
+function dedupeOneFolder(
+    htmlDir: string,
+    folder: string,
+    allowedExt: Set<string>
+): { removed: string[]; kept: number; pathMap: Map<string, string> } {
+    const dir = path.join(htmlDir, folder);
+    const pathMap = new Map<string, string>();
+    const removed: string[] = [];
+    let kept = 0;
+
+    if (!fs.existsSync(dir)) {
+        return { removed, kept, pathMap };
     }
 
     const byHash = new Map<string, string[]>();
-    for (const name of fs.readdirSync(imagesDir)) {
-        const full = path.join(imagesDir, name);
+    for (const name of fs.readdirSync(dir)) {
+        const full = path.join(dir, name);
         try {
             if (!fs.statSync(full).isFile()) {
                 continue;
             }
-            if (!KNOWN_EXT.has(path.extname(name).toLowerCase())) {
+            if (!allowedExt.has(path.extname(name).toLowerCase())) {
                 continue;
             }
             const hash = fileHash(fs.readFileSync(full));
@@ -392,12 +397,9 @@ export function dedupeImagesFolder(
 
     const score = (n: string) => {
         const dup = /_\d+\.[^.]+$/i.test(n) ? 10 : 0;
-        return dup + n.length;
+        const copy = /copy|дубл| \(/i.test(n) ? 5 : 0;
+        return dup + copy + n.length;
     };
-
-    let current = html;
-    const removed: string[] = [];
-    let kept = 0;
 
     for (const names of byHash.values()) {
         if (names.length < 2) {
@@ -407,26 +409,129 @@ export function dedupeImagesFolder(
         names.sort((a, b) => score(a) - score(b) || a.localeCompare(b));
         const keeper = names[0];
         kept += 1;
-        const keeperLocal = localPath(keeper);
+        const keeperRel = `${folder}/${keeper}`.replace(/\\/g, '/');
         for (const dup of names.slice(1)) {
-            const dupLocal = localPath(dup);
-            if (current.includes(dupLocal)) {
-                current = current.split(dupLocal).join(keeperLocal);
-            }
-            // также относительные варианты
-            if (current.includes(`./${dupLocal}`)) {
-                current = current.split(`./${dupLocal}`).join(keeperLocal);
-            }
+            const dupRel = `${folder}/${dup}`.replace(/\\/g, '/');
+            pathMap.set(dupRel, keeperRel);
             try {
-                fs.unlinkSync(path.join(imagesDir, dup));
-                removed.push(dup);
+                fs.unlinkSync(path.join(dir, dup));
+                removed.push(dupRel);
             } catch {
                 // ignore locked files
             }
         }
     }
 
-    return { html: current, removed, kept };
+    return { removed, kept, pathMap };
+}
+
+/** Подмена путей в тексте (HTML / CSS). */
+function rewriteAssetPaths(text: string, pathMap: Map<string, string>): string {
+    if (pathMap.size === 0) {
+        return text;
+    }
+    let current = text;
+    // длинные пути сначала, чтобы не пересекаться
+    const entries = [...pathMap.entries()].sort((a, b) => b[0].length - a[0].length);
+    for (const [from, to] of entries) {
+        if (current.includes(from)) {
+            current = current.split(from).join(to);
+        }
+        const dotted = `./${from}`;
+        if (current.includes(dotted)) {
+            current = current.split(dotted).join(to);
+        }
+    }
+    return current;
+}
+
+/** Переписать url()/пути внутри css/*.css после дедупа. */
+function rewriteCssFilesOnDisk(htmlDir: string, pathMap: Map<string, string>): void {
+    if (pathMap.size === 0) {
+        return;
+    }
+    const cssDir = path.join(htmlDir, 'css');
+    if (!fs.existsSync(cssDir)) {
+        return;
+    }
+    for (const name of fs.readdirSync(cssDir)) {
+        if (!/\.css$/i.test(name)) {
+            continue;
+        }
+        const full = path.join(cssDir, name);
+        try {
+            if (!fs.statSync(full).isFile()) {
+                continue;
+            }
+            const before = fs.readFileSync(full, 'utf8');
+            const after = rewriteAssetPaths(before, pathMap);
+            if (after !== before) {
+                fs.writeFileSync(full, after, 'utf8');
+            }
+        } catch {
+            // ignore
+        }
+    }
+}
+
+export type DedupeAssetsResult = {
+    html: string;
+    removed: string[];
+    kept: number;
+};
+
+/**
+ * Дубли по содержимому (SHA-1) в images/, css/, js/ (и scripts/, если есть).
+ * Одинаковые файлы схлопываются; ссылки в HTML и в css/*.css обновляются.
+ */
+export function dedupeAssetFolders(
+    html: string,
+    htmlDir: string,
+    folders: Array<'images' | 'css' | 'js' | 'scripts'> = ['images', 'css', 'js', 'scripts']
+): DedupeAssetsResult {
+    const allRemoved: string[] = [];
+    let kept = 0;
+    const pathMap = new Map<string, string>();
+
+    const extsFor = (folder: string): Set<string> => {
+        if (folder === 'images') {
+            return KNOWN_EXT;
+        }
+        if (folder === 'css') {
+            return new Set(['.css']);
+        }
+        return new Set(['.js', '.mjs', '.cjs']);
+    };
+
+    for (const folder of folders) {
+        const part = dedupeOneFolder(htmlDir, folder, extsFor(folder));
+        kept += part.kept;
+        allRemoved.push(...part.removed);
+        for (const [from, to] of part.pathMap) {
+            pathMap.set(from, to);
+        }
+    }
+
+    let current = rewriteAssetPaths(html, pathMap);
+    rewriteCssFilesOnDisk(htmlDir, pathMap);
+
+    return { html: current, removed: allRemoved, kept };
+}
+
+/**
+ * Дубли только в images/ (после скачивания внешних картинок).
+ */
+export function dedupeImagesFolder(
+    html: string,
+    htmlDir: string
+): { html: string; removed: string[]; kept: number } {
+    const r = dedupeAssetFolders(html, htmlDir, ['images']);
+    // для обратной совместимости — имена без префикса images/
+    return {
+        html: r.html,
+        removed: r.removed.map(p => p.replace(/^images\//i, '')),
+        kept: r.kept
+    };
 }
 
 /** Собрать внешние URL из img[src] и srcset. */

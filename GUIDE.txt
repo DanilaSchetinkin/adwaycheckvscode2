@@ -72,7 +72,9 @@ GitHub: https://github.com/DanilaSchetinkin
   · id="oneform", лишний <base>
   · Ссылки <a href> (#, offer, tel, mailto…)
   · target, <picture>/<source>
-  · Локальные пути (подсказки images/ css/ js/)
+  · Локальные пути (images/ css/ js/ media/, url() в CSS, poster)
+  · Неподключённые / отсутствующие локальные скрипты
+  · Видео-ленды: Hermes/VideoJS, media/, css/video.css, js/video.js
   · Внешние изображения / CSS / JS (вне whitelist)
   · SID/Country (если настроен Sheets)
   · Пустые / дублирующиеся / неиспользуемые скрипты (эвристика)
@@ -81,11 +83,26 @@ GitHub: https://github.com/DanilaSchetinkin
 5. ПОЛЕЗНЫЕ КОМАНДЫ
 -------------------
   Adway: Создать структуру проекта
-    → папки images/, css/, js/, other/, index.html
+    → папки images/, css/, js/, media/, other/, index.html
+    → scripts/ → js/ (пустую scripts/ удаляет)
+    → видео → media/
     (пустые style.css / main.js больше не создаются)
 
+  Adway: Вставить <span id="oneform">
+    → якорь для скрипта прокрутки (сниппет adway-oneform)
+
+  Adway: Подключить / удалить скрипт
+    → неподключённые файлы в js/ или битые <script src>
+
+  Adway: Удалить дубли (images/css/js)
+    → одинаковое содержимое в images/, css/, js/ (и scripts/) → один файл
+    → пути в HTML и в css/*.css обновляются
+
   Adway: Почистить лендинг
-    → убрать target, flatten picture, нормализация href
+    → убрать target, flatten picture, нормализация href, <link> → <head>
+
+  Adway: Перенести <link> в <head>
+    → все <link> вне head переносит перед </head>
 
   Adway: Починить форму заказа
     → action/method/oneform/required/hidden
@@ -94,6 +111,13 @@ GitHub: https://github.com/DanilaSchetinkin
     → только URL из ошибок «Внешнее изображение»
     → уже есть в images/ по имени — не качает снова
     → байт-в-байт дубли схлопываются (в уведомлении — какие файлы удалены)
+
+  Adway: Установить видео-плеер (бесплатный)
+    → локальный Adway-плеер без Hermes/VideoJS/платных виджетов
+    → если есть .mp4/.webm — создать media/ и перенести туда
+    → нормализовать media/video.mp4, заменить Hermes/VideoJS
+    → записать css/video.css + js/video.js
+    → jQuery 3.6.0 (cdnjs) с новой строки в <head>
 
   Adway: Обновить кэш SID/Country
     → перечитать Sheets
