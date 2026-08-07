@@ -107,6 +107,7 @@ function fileExistsInsensitive(filePath: string): boolean {
 /**
  * Ищет fileName в images/css/js/media, в корне лендинга и рекурсивно (до maxDepth).
  * Возвращает реальный относительный путь, где файл уже лежит.
+ * Также ищет по «стволу» имени: other/uuid → images/uuid.png (после переноса/расширения).
  */
 export function findAssetByBasename(
     htmlDir: string,
@@ -119,12 +120,11 @@ export function findAssetByBasename(
     }
     const ext = path.extname(base);
     const baseLower = base.toLowerCase();
+    const stem = (ext ? base.slice(0, -ext.length) : base).toLowerCase();
 
-    // 1) корень лендинга (src="ava14.jpg" при файле рядом с HTML — тогда путь уже ок;
-    //    здесь нужно, если в HTML другой путь, а файл лежит в корне)
+    // 1) корень лендинга
     const atRoot = path.join(htmlDir, base);
     if (fileExistsInsensitive(atRoot)) {
-        // вернуть фактическое имя файла с диска (регистр)
         try {
             const real = fs.readdirSync(htmlDir).find(f => f.toLowerCase() === baseLower);
             return real || base;
@@ -133,12 +133,19 @@ export function findAssetByBasename(
         }
     }
 
-    // 2) стандартные папки + 1 уровень
+    // 2) стандартные папки + 1 уровень (точное имя)
     const folders = foldersForExt(ext);
     for (const folder of folders) {
         const direct = path.join(htmlDir, folder, base);
         if (fileExistsInsensitive(direct)) {
-            return `${folder}/${base}`.replace(/\\/g, '/');
+            try {
+                const real = fs
+                    .readdirSync(path.join(htmlDir, folder))
+                    .find(f => f.toLowerCase() === baseLower);
+                return `${folder}/${real || base}`.replace(/\\/g, '/');
+            } catch {
+                return `${folder}/${base}`.replace(/\\/g, '/');
+            }
         }
         const folderPath = path.join(htmlDir, folder);
         if (!fs.existsSync(folderPath)) {
@@ -159,8 +166,9 @@ export function findAssetByBasename(
         }
     }
 
-    // 3) рекурсивный обход всего проекта
-    const found: string[] = [];
+    // 3) рекурсивный обход: точное имя + совпадение по stem (uuid → uuid.png)
+    const foundExact: string[] = [];
+    const foundStem: string[] = [];
     const walk = (dir: string, rel: string, depth: number) => {
         if (depth > maxDepth) {
             return;
@@ -176,6 +184,7 @@ export function findAssetByBasename(
                 continue;
             }
             if (entry.isDirectory()) {
+                // other/ не предлагаем как целевой путь, но ищем файлы в images/…
                 if (SKIP_WALK_DIRS.has(entry.name)) {
                     continue;
                 }
@@ -186,34 +195,52 @@ export function findAssetByBasename(
                 );
                 continue;
             }
-            if (entry.name.toLowerCase() === baseLower) {
-                found.push(rel ? `${rel}/${entry.name}` : entry.name);
+            const nameLower = entry.name.toLowerCase();
+            const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+            if (nameLower === baseLower) {
+                foundExact.push(relPath);
+                continue;
+            }
+            if (stem) {
+                const entryStem = path.basename(entry.name, path.extname(entry.name)).toLowerCase();
+                if (entryStem === stem) {
+                    foundStem.push(relPath);
+                }
             }
         }
     };
     walk(htmlDir, '', 0);
 
-    if (found.length === 0) {
-        return undefined;
-    }
+    const rank = (p: string) => {
+        const n = p.replace(/\\/g, '/').toLowerCase();
+        let score = 10 + n.split('/').length;
+        if (n.startsWith('images/')) {
+            score = 0;
+        } else if (n.startsWith('media/')) {
+            score = 1;
+        } else if (n.startsWith('css/')) {
+            score = 2;
+        } else if (n.startsWith('js/') || n.startsWith('scripts/')) {
+            score = 3;
+        } else if (n.startsWith('fonts/')) {
+            score = 4;
+        }
+        // если в HTML было .png — чуть предпочесть .png
+        if (ext && n.endsWith(ext.toLowerCase())) {
+            score -= 0.5;
+        }
+        return score;
+    };
 
-    found.sort((a, b) => {
-        const score = (p: string) => {
-            const n = p.replace(/\\/g, '/').toLowerCase();
-            if (
-                n.startsWith('images/') ||
-                n.startsWith('css/') ||
-                n.startsWith('js/') ||
-                n.startsWith('media/')
-            ) {
-                return 0;
-            }
-            return 1 + n.split('/').length;
-        };
-        return score(a) - score(b) || a.length - b.length;
-    });
+    const pick = (list: string[]) => {
+        if (list.length === 0) {
+            return undefined;
+        }
+        list.sort((a, b) => rank(a) - rank(b) || a.length - b.length);
+        return list[0].replace(/\\/g, '/');
+    };
 
-    return found[0].replace(/\\/g, '/');
+    return pick(foundExact) || pick(foundStem);
 }
 
 function collectCssUrls(content: string): Array<{ url: string; search: string }> {
@@ -381,32 +408,42 @@ export function findMissingLocalPaths(html: string, htmlDir: string): LocalPathI
         }
         seen.add(key);
 
-        if (fileExistsInsensitive(resolved)) {
+        const reportUrl = clean.replace(/\\/g, '/');
+        const inOther = /(^|\/)other\//i.test(reportUrl);
+
+        // Файл по старому пути есть, но лежит в other/ — всё равно ищем лучше в images/…
+        const existsHere = fileExistsInsensitive(resolved);
+        if (existsHere && !inOther) {
             continue;
         }
 
         const foundRelFromHtml = findAssetByBasename(htmlDir, path.basename(clean));
         let suggestedUrl: string | undefined;
-        if (foundRelFromHtml) {
+        if (foundRelFromHtml && !/(^|\/)other\//i.test(foundRelFromHtml)) {
             const foundAbs = path.normalize(path.resolve(htmlDir, foundRelFromHtml));
-            if (baseDir) {
-                // для CSS — путь относительно самого CSS-файла (../images/1.png)
-                suggestedUrl = toRel(baseDir, foundAbs);
-            } else {
-                suggestedUrl = foundRelFromHtml.replace(/\\/g, '/');
+            // если other/ ещё существует, но нашли images/ — предлагаем images/
+            if (!existsHere || foundAbs.toLowerCase() !== resolved.toLowerCase()) {
+                if (baseDir) {
+                    suggestedUrl = toRel(baseDir, foundAbs);
+                } else {
+                    suggestedUrl = foundRelFromHtml.replace(/\\/g, '/');
+                }
             }
         }
 
-        // в отчёте для CSS показываем путь как в url()
-        const reportUrl = clean.replace(/\\/g, '/');
-
-        missing.push({
-            url: reportUrl,
-            resolved,
-            search,
-            suggestedUrl,
-            cssFile
-        });
+        // other/ без альтернативы — тоже ошибка (нужно перенести вручную / восстановить расширения)
+        if (existsHere && !suggestedUrl) {
+            continue;
+        }
+        if (!existsHere || suggestedUrl) {
+            missing.push({
+                url: reportUrl,
+                resolved,
+                search,
+                suggestedUrl,
+                cssFile
+            });
+        }
     }
 
     return missing;
@@ -420,9 +457,29 @@ export function fixCssLocalPaths(
     html: string,
     htmlDir: string
 ): { fixed: number; files: string[] } {
+    const previews = previewCssLocalPathFixes(html, htmlDir);
+    const files: string[] = [];
+    let fixed = 0;
+    for (const p of previews) {
+        try {
+            fs.writeFileSync(p.absPath, p.after, 'utf8');
+            files.push(p.fileRel);
+            fixed += p.fixCount;
+        } catch {
+            // ignore locked
+        }
+    }
+    return { fixed, files };
+}
+
+/** Превью правок url() в CSS без записи на диск. */
+export function previewCssLocalPathFixes(
+    html: string,
+    htmlDir: string
+): Array<{ fileRel: string; absPath: string; before: string; after: string; fixCount: number }> {
     const issues = findMissingLocalPaths(html, htmlDir).filter(i => i.cssFile && i.suggestedUrl);
     if (issues.length === 0) {
-        return { fixed: 0, files: [] };
+        return [];
     }
 
     const byFile = new Map<string, LocalPathIssue[]>();
@@ -432,8 +489,13 @@ export function fixCssLocalPaths(
         byFile.set(issue.cssFile!, list);
     }
 
-    let fixed = 0;
-    const files: string[] = [];
+    const out: Array<{
+        fileRel: string;
+        absPath: string;
+        before: string;
+        after: string;
+        fixCount: number;
+    }> = [];
 
     for (const [cssRel, fileIssues] of byFile) {
         const full = path.join(htmlDir, cssRel);
@@ -444,32 +506,30 @@ export function fixCssLocalPaths(
             continue;
         }
         let next = text;
-        // длинные search сначала
+        let fixCount = 0;
         const sorted = [...fileIssues].sort((a, b) => b.search.length - a.search.length);
         for (const issue of sorted) {
             if (!issue.suggestedUrl) {
                 continue;
             }
-            // заменить url(...) целиком или только путь внутри
             if (next.includes(issue.search)) {
                 const rebuilt = issue.search.replace(issue.url, issue.suggestedUrl);
-                // если url без кавычек и путь с пробелами — обернуть
                 next = next.split(issue.search).join(rebuilt);
-                fixed += 1;
+                fixCount += 1;
             } else if (next.includes(issue.url)) {
                 next = next.split(issue.url).join(issue.suggestedUrl);
-                fixed += 1;
+                fixCount += 1;
             }
         }
         if (next !== text) {
-            try {
-                fs.writeFileSync(full, next, 'utf8');
-                files.push(cssRel);
-            } catch {
-                // ignore locked
-            }
+            out.push({
+                fileRel: cssRel,
+                absPath: full,
+                before: text,
+                after: next,
+                fixCount
+            });
         }
     }
-
-    return { fixed, files };
+    return out;
 }

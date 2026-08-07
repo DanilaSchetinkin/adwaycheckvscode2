@@ -2,6 +2,7 @@ import { JSDOM } from 'jsdom';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { findMissingLocalPaths } from './filePaths';
+import { findExtensionlessAssets } from './extensionlessAssets';
 import { countLinksOutsideHead } from './cleanup';
 import { checkScriptAssets } from './scriptAssets';
 import { detectVideoLandingIssues } from './videoPlayer';
@@ -1236,6 +1237,28 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
                         issue.cssFile ? issue.cssFile : issue.search
                     );
                 }
+            }
+
+            const extless = findExtensionlessAssets(options.htmlDir);
+            if (extless.length > 0) {
+                const byKind = new Map<string, number>();
+                for (const i of extless) {
+                    byKind.set(i.kind, (byKind.get(i.kind) || 0) + 1);
+                }
+                const kindSummary = [...byKind.entries()]
+                    .map(([k, n]) => `${k.toUpperCase()}×${n}`)
+                    .join(', ');
+                const samples = extless
+                    .slice(0, 5)
+                    .map(i => `${i.relPath}→${i.suggestedRel}`)
+                    .join('; ');
+                push(
+                    results,
+                    false,
+                    `❌ Файлы без расширения: <span class="value-highlight">${extless.length}</span> (${escapeHtml(kindSummary)}) — пример: <span class="value-highlight">${escapeHtml(samples)}</span>. Adway: Восстановить расширения ассетов`,
+                    html,
+                    extless[0].relPath
+                );
             }
 
             for (const issue of scriptIssues) {

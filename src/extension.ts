@@ -23,12 +23,19 @@ import { initProjectStructureCommand } from './projectStructure';
 import { ONEFORM_SPAN } from './snippetTexts';
 import { SnippetProvider } from './snippets';
 import { AdwayStatusBar } from './statusBar';
+import { runFixWizard } from './fixWizard';
+import { fixExtensionlessAssets, findExtensionlessAssets } from './extensionlessAssets';
 import { setupAdwayVideoPlayer } from './videoPlayer';
 import {
     buildVideoHtmlBlock,
     buildVideoJs,
     VIDEO_CSS
 } from './videoTemplates';
+import { previewCssDiffs, previewDiffAndConfirm, registerChangePreview } from './ai/changePreview';
+import { buildPlayerReplacePlan, detectOldPlayer } from './ai/aiPlayer';
+import { checkOllamaAvailable, getOllamaConfig } from './ai/ollamaClient';
+import { getTemplatesStatus } from './ai/templatesLoader';
+import { openAdwayAiChat } from './ai/aiChatPanel';
 
 let diagnosticsProvider: AdwayDiagnostics;
 let statusBar: AdwayStatusBar;
@@ -41,6 +48,7 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('Adway Checker активирован');
 
     initSheets(context);
+    registerChangePreview(context);
 
     diagnosticsProvider = new AdwayDiagnostics();
     statusBar = new AdwayStatusBar();
@@ -118,6 +126,14 @@ export function activate(context: vscode.ExtensionContext) {
         })(),
         vscode.commands.registerCommand('adway.focusResultsTree', () => {
             void vscode.commands.executeCommand('adwayResults.focus');
+        }),
+        vscode.commands.registerCommand('adway.fixWizard', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            await runFixWizard(editor, doc => diagnosticsProvider.updateDiagnostics(doc));
         }),
         vscode.languages.registerCodeActionsProvider(
             { language: 'html', scheme: '*' },
@@ -502,6 +518,242 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(
                 `Adway: бесплатный видео-плеер — ${parts.slice(0, 6).join('; ') || 'готово'}`
             );
+        }),
+        vscode.commands.registerCommand('adway.aiCheck', async () => {
+            const status = await checkOllamaAvailable();
+            const cfg = getOllamaConfig();
+            const templates = getTemplatesStatus();
+            const parts = [status.message, templates.message];
+            if (status.ok) {
+                vscode.window.showInformationMessage(`Adway AI: ${parts.join(' · ')}`);
+            } else {
+                vscode.window.showWarningMessage(`Adway AI: ${parts.join(' · ')}`);
+            }
+            console.log('Adway AI config', cfg, status, templates);
+        }),
+        vscode.commands.registerCommand('adway.aiChat', () => {
+            openAdwayAiChat(context);
+        }),
+        vscode.commands.registerCommand('adway.aiRemoveOldPlayer', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            const html = editor.document.getText();
+            const htmlDir =
+                editor.document.uri.scheme === 'file'
+                    ? path.dirname(editor.document.uri.fsPath)
+                    : undefined;
+
+            const detected = await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'Adway AI: ищем секцию старого плеера…',
+                    cancellable: false
+                },
+                async () => detectOldPlayer(html)
+            );
+
+            if (!detected.snippet) {
+                vscode.window.showInformationMessage(
+                    `Adway AI: блок плеера не найден (${detected.reason})`
+                );
+                return;
+            }
+
+            const plan = buildPlayerReplacePlan(html, detected, htmlDir);
+            if (plan.htmlAfterReplace === html) {
+                vscode.window.showErrorMessage('Adway AI: не удалось подготовить замену секции');
+                return;
+            }
+
+            type AiPlayerMode = 'replace' | 'delete';
+            let action: AiPlayerMode | undefined;
+            let cssAlreadyPreviewed = false;
+
+            const pickAction = async (title: string): Promise<AiPlayerMode | 'css' | undefined> => {
+                const item = await vscode.window.showQuickPick(
+                    [
+                        {
+                            label: 'Заменить секцию на бесплатный плеер',
+                            description: 'рекомендуется',
+                            detail: plan.summaryLines.join(' · '),
+                            id: 'replace' as const
+                        },
+                        {
+                            label: 'Только удалить секцию',
+                            description: 'без #container_video',
+                            detail: plan.summaryLines.join(' · '),
+                            id: 'delete' as const
+                        },
+                        {
+                            label: 'Сначала показать CSS-diff',
+                            description:
+                                plan.cssCleanups.length > 0
+                                    ? `${plan.cssCleanups.length} файл(ов)`
+                                    : 'правил не найдено',
+                            detail: 'Compare по CSS (как в Visual Studio)',
+                            id: 'css' as const
+                        }
+                    ],
+                    { title, placeHolder: detected.reason }
+                );
+                return item?.id;
+            };
+
+            let choice = await pickAction('Adway AI: что сделать с найденной секцией?');
+            if (!choice) {
+                return;
+            }
+            if (choice === 'css') {
+                cssAlreadyPreviewed = true;
+                if (!plan.cssCleanups.length) {
+                    vscode.window.showInformationMessage(
+                        'Adway AI: в локальных CSS правил старого плеера не найдено'
+                    );
+                } else {
+                    await previewCssDiffs(
+                        plan.cssCleanups.map(c => ({
+                            fileRel: c.fileRel,
+                            before: c.before,
+                            after: c.after,
+                            targetUri: vscode.Uri.file(c.absPath)
+                        }))
+                    );
+                }
+                const again = await vscode.window.showQuickPick(
+                    [
+                        {
+                            label: 'Заменить секцию на бесплатный плеер',
+                            id: 'replace' as const
+                        },
+                        {
+                            label: 'Только удалить секцию',
+                            id: 'delete' as const
+                        }
+                    ],
+                    { title: 'Adway AI: применить после просмотра CSS?' }
+                );
+                if (!again) {
+                    return;
+                }
+                action = again.id;
+            } else {
+                action = choice;
+            }
+
+            const proposed =
+                action === 'replace' ? plan.htmlAfterReplace : plan.htmlAfterDelete;
+            const title =
+                action === 'replace'
+                    ? 'Adway AI: HTML было ↔ будет (секция → бесплатный плеер)'
+                    : 'Adway AI: HTML было ↔ будет (удаление секции)';
+
+            const cssNote = plan.cssCleanups.length
+                ? ` + CSS (${plan.cssCleanups.map(c => c.fileRel).join(', ')})`
+                : '';
+            const okPreview = await previewDiffAndConfirm({
+                title,
+                original: html,
+                proposed,
+                language: 'html',
+                message: `${plan.summaryLines.slice(0, 3).join('\n')}${cssNote}\n\nСлева — было, справа — будет.`,
+                applyLabel: plan.cssCleanups.length ? 'Применить HTML + CSS' : 'Применить',
+                cancelLabel: 'Отмена',
+                targetUri: editor.document.uri
+            });
+            if (!okPreview) {
+                return;
+            }
+
+            let writeCss = plan.cssCleanups.length > 0;
+            if (writeCss && !cssAlreadyPreviewed) {
+                const seeCss = await vscode.window.showInformationMessage(
+                    `Показать diff CSS перед записью (${plan.cssCleanups.length})?`,
+                    'Показать',
+                    'Сразу записать',
+                    'Без CSS'
+                );
+                if (seeCss === 'Показать') {
+                    await previewCssDiffs(
+                        plan.cssCleanups.map(c => ({
+                            fileRel: c.fileRel,
+                            before: c.before,
+                            after: c.after,
+                            targetUri: vscode.Uri.file(c.absPath)
+                        }))
+                    );
+                    const go = await vscode.window.showInformationMessage(
+                        'Записать CSS-правки на диск?',
+                        'Записать CSS',
+                        'Пропустить CSS'
+                    );
+                    writeCss = go === 'Записать CSS';
+                } else if (seeCss === 'Без CSS' || seeCss === undefined) {
+                    writeCss = false;
+                }
+            }
+
+            if (writeCss) {
+                for (const c of plan.cssCleanups) {
+                    fs.writeFileSync(c.absPath, c.after, 'utf8');
+                }
+            }
+
+            const liveDoc = await vscode.workspace.openTextDocument(editor.document.uri);
+            const fullRange = new vscode.Range(
+                liveDoc.positionAt(0),
+                liveDoc.positionAt(liveDoc.getText().length)
+            );
+            const we = new vscode.WorkspaceEdit();
+            we.replace(liveDoc.uri, fullRange, proposed);
+            const ok = await vscode.workspace.applyEdit(we);
+            if (!ok) {
+                vscode.window.showErrorMessage('Adway AI: правка HTML не применилась');
+                return;
+            }
+            await vscode.window.showTextDocument(liveDoc, { preview: false, preserveFocus: false });
+
+            let note =
+                action === 'replace'
+                    ? `секция заменена на бесплатный плеер (${detected.source})`
+                    : `секция удалена (${detected.source})`;
+            if (writeCss) {
+                note += `; CSS обновлён (${plan.cssCleanups.length})`;
+            }
+
+            if (action === 'replace' && htmlDir) {
+                const afterDoc = await vscode.workspace.openTextDocument(editor.document.uri);
+                await afterDoc.save();
+                const after = afterDoc.getText();
+                const result = setupAdwayVideoPlayer(after, htmlDir, {
+                    writeAssets: true,
+                    cleanup: false
+                });
+                if (result.html !== after) {
+                    const range2 = new vscode.Range(
+                        afterDoc.positionAt(0),
+                        afterDoc.positionAt(after.length)
+                    );
+                    const we2 = new vscode.WorkspaceEdit();
+                    we2.replace(afterDoc.uri, range2, result.html);
+                    await vscode.workspace.applyEdit(we2);
+                    const saved = await vscode.workspace.openTextDocument(editor.document.uri);
+                    await saved.save();
+                    await vscode.window.showTextDocument(saved, { preview: false });
+                }
+                if (result.created.length || result.notes.length) {
+                    note += `; assets: ${(result.created.length ? result.created : result.notes)
+                        .slice(0, 4)
+                        .join(', ')}`;
+                }
+            }
+
+            await diagnosticsProvider.updateDiagnostics(
+                await vscode.workspace.openTextDocument(editor.document.uri)
+            );
+            vscode.window.showInformationMessage(`Adway AI: ${note}`);
         }),
         vscode.commands.registerCommand('adway.insertVideoBlock', async () => {
             const editor = vscode.window.activeTextEditor;
@@ -970,6 +1222,55 @@ export function activate(context: vscode.ExtensionContext) {
                 parts.push(`CSS: ${cssFixed} (${cssFiles.slice(0, 4).join(', ')})`);
             }
             vscode.window.showInformationMessage(`Adway: пути исправлены (${parts.join('; ')})`);
+        }),
+        vscode.commands.registerCommand('adway.fixExtensionlessAssets', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            if (editor.document.uri.scheme !== 'file') {
+                vscode.window.showErrorMessage('Сохраните HTML на диск');
+                return;
+            }
+            const htmlDir = path.dirname(editor.document.uri.fsPath);
+            const found = findExtensionlessAssets(htmlDir);
+            if (found.length === 0) {
+                vscode.window.showInformationMessage('Adway: файлов без расширения не найдено');
+                return;
+            }
+            const confirm = await vscode.window.showWarningMessage(
+                `Найдено ${found.length} файл(ов) без расширения (PNG/SVG/JPEG/WEBP/MP4…). Переименовать и обновить ссылки в HTML/CSS?`,
+                { modal: true },
+                'Восстановить',
+                'Отмена'
+            );
+            if (confirm !== 'Восстановить') {
+                return;
+            }
+            const html = editor.document.getText();
+            const result = fixExtensionlessAssets(html, htmlDir);
+            if (result.html !== html) {
+                const fullRange = new vscode.Range(
+                    editor.document.positionAt(0),
+                    editor.document.positionAt(html.length)
+                );
+                const we = new vscode.WorkspaceEdit();
+                we.replace(editor.document.uri, fullRange, result.html);
+                const ok = await vscode.workspace.applyEdit(we);
+                if (!ok) {
+                    vscode.window.showErrorMessage('Adway: HTML не обновлён после переименования');
+                    return;
+                }
+                await editor.document.save();
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            const preview = result.renamed.slice(0, 6).join('; ') + (result.renamed.length > 6 ? '…' : '');
+            vscode.window.showInformationMessage(
+                `Adway: расширений восстановлено ${result.renamed.length}` +
+                    (result.refsUpdated ? `, ссылок: ${result.refsUpdated}` : '') +
+                    (preview ? ` (${preview})` : '')
+            );
         })
     );
 

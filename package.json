@@ -25,6 +25,11 @@
         "icon": "$(search)"
       },
       {
+        "command": "adway.fixWizard",
+        "title": "Adway: Мастер правок (Compare по ошибкам)",
+        "icon": "$(diff)"
+      },
+      {
         "command": "adway.insertJquery",
         "title": "Adway: Вставить jQuery",
         "icon": "$(code)"
@@ -110,6 +115,11 @@
         "icon": "$(replace-all)"
       },
       {
+        "command": "adway.fixExtensionlessAssets",
+        "title": "Adway: Восстановить расширения ассетов",
+        "icon": "$(file-binary)"
+      },
+      {
         "command": "adway.insertDoctype",
         "title": "Adway: Вставить <!DOCTYPE html>",
         "icon": "$(file-code)"
@@ -183,6 +193,21 @@
         "command": "adway.setupVideoPlayer",
         "title": "Adway: Установить видео-плеер (бесплатный)",
         "icon": "$(device-camera-video)"
+      },
+      {
+        "command": "adway.aiCheck",
+        "title": "Adway: AI — проверить Ollama",
+        "icon": "$(server)"
+      },
+      {
+        "command": "adway.aiChat",
+        "title": "Adway: AI Chat (Ollama)",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "adway.aiRemoveOldPlayer",
+        "title": "Adway: AI — убрать старый плеер",
+        "icon": "$(sparkle)"
       },
       {
         "command": "adway.insertVideoBlock",
@@ -309,6 +334,32 @@
           "type": "boolean",
           "default": true,
           "description": "Предупреждать о пустых, дублирующихся и возможно неиспользуемых функциях в <script>"
+        },
+        "adway.ai.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Включить команды локального ИИ (Ollama)"
+        },
+        "adway.ai.host": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "URL Ollama (локально)"
+        },
+        "adway.ai.model": {
+          "type": "string",
+          "default": "qwen2.5-coder:3b",
+          "description": "Модель Ollama. На ~4 GB VRAM: qwen2.5-coder:3b (или 1.5b). На ~8 GB: qwen2.5-coder:7b"
+        },
+        "adway.ai.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 5000,
+          "description": "Таймаут запроса к Ollama (мс)"
+        },
+        "adway.templatesPath": {
+          "type": "string",
+          "default": "",
+          "description": "Папка своих шаблонов для ИИ (например шаблоны или C:\\\\path\\\\шаблоны). Пусто = искать ./шаблоны или ./templates в корне workspace. Подпапки: «бесплатный плеер», «платный плеер», «лэнд»."
         }
       }
     },
@@ -524,6 +575,11 @@
         },
         {
           "when": "editorLangId == html",
+          "command": "adway.fixWizard",
+          "group": "adway@1"
+        },
+        {
+          "when": "editorLangId == html",
           "command": "adway.cleanupLanding",
           "group": "adway@2"
         },
@@ -549,6 +605,10 @@
         }
       ],
       "adway.fixMenu": [
+        {
+          "command": "adway.fixWizard",
+          "group": "0_wizard@1"
+        },
         {
           "command": "adway.fixOrderForm",
           "group": "1_form@1"
@@ -576,6 +636,10 @@
         {
           "command": "adway.fixAllLocalPaths",
           "group": "2_links@4"
+        },
+        {
+          "command": "adway.fixExtensionlessAssets",
+          "group": "2_links@5"
         },
         {
           "command": "adway.flattenPicture",
@@ -612,6 +676,18 @@
         {
           "command": "adway.setupVideoPlayer",
           "group": "3_markup@9"
+        },
+        {
+          "command": "adway.aiRemoveOldPlayer",
+          "group": "3_markup@10"
+        },
+        {
+          "command": "adway.aiChat",
+          "group": "3_markup@10.5"
+        },
+        {
+          "command": "adway.aiCheck",
+          "group": "3_markup@11"
         },
         {
           "command": "adway.connectScriptFile",

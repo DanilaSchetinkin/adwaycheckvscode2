@@ -21,6 +21,7 @@ export const AdwayDiagnosticCodes = {
     picture: 'adway.picture',
     linkOutsideHead: 'adway.linkOutsideHead',
     localPath: 'adway.localPath',
+    extensionless: 'adway.extensionless',
     externalImage: 'adway.externalImage',
     externalCss: 'adway.externalCss',
     externalJs: 'adway.externalJs',
@@ -69,6 +70,9 @@ export function detectCode(text: string): string | undefined {
     }
     if (t.includes('форма внутри #container_video')) {
         return AdwayDiagnosticCodes.videoFormInside;
+    }
+    if (t.includes('без расширения') || t.includes('восстановить расширения')) {
+        return AdwayDiagnosticCodes.extensionless;
     }
     // пути/внешние ресурсы — раньше jquery (иначе «файл …jquery.min.js» ловится как jquery)
     if (t.includes('неверный путь') || t.includes('файл не найден')) {
@@ -210,6 +214,13 @@ export function getFixesForCode(code: string | undefined): ResultFixAction[] {
             return [
                 { label: 'Исправить путь (HTML + CSS url)', command: 'adway.fixLocalPath' },
                 { label: 'Исправить все пути (HTML + CSS)', command: 'adway.fixAllLocalPaths' }
+            ];
+        case AdwayDiagnosticCodes.extensionless:
+            return [
+                {
+                    label: 'Восстановить расширения ассетов (PNG/SVG/…)',
+                    command: 'adway.fixExtensionlessAssets'
+                }
             ];
         case AdwayDiagnosticCodes.externalImage:
             return [

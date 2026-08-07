@@ -3,6 +3,7 @@ import * as path from 'path';
 import {
     buildVideoHtmlBlock,
     buildVideoJs,
+    extractVideoBlockTexts,
     JQUERY_CDN,
     VIDEO_CSS,
     VIDEO_CSS_LINK,
@@ -203,6 +204,39 @@ function escapeRegExp(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Баланс закрывающего тега (вложенность). */
+function findBalancedClose(html: string, openIdx: number, tag: string): number | null {
+    const openRe = new RegExp(`<${tag}\\b[^>]*>`, 'gi');
+    const closeRe = new RegExp(`</${tag}\\s*>`, 'gi');
+    openRe.lastIndex = openIdx;
+    const first = openRe.exec(html);
+    if (!first || first.index !== openIdx) {
+        return null;
+    }
+    let depth = 1;
+    let pos = openIdx + first[0].length;
+    while (depth > 0 && pos < html.length) {
+        openRe.lastIndex = pos;
+        closeRe.lastIndex = pos;
+        const nextOpen = openRe.exec(html);
+        const nextClose = closeRe.exec(html);
+        if (!nextClose) {
+            return null;
+        }
+        if (nextOpen && nextOpen.index < nextClose.index) {
+            depth += 1;
+            pos = nextOpen.index + nextOpen[0].length;
+        } else {
+            depth -= 1;
+            pos = nextClose.index + nextClose[0].length;
+            if (depth === 0) {
+                return pos;
+            }
+        }
+    }
+    return null;
+}
+
 function ensureHeadLinks(html: string): string {
     let next = html;
 
@@ -268,38 +302,83 @@ function writeAssetFiles(htmlDir: string, created: string[], showForm: number): 
 function replacePlayerBlocks(html: string, mediaSrc: string): { html: string; replaced: boolean } {
     let next = html;
     let replaced = false;
+    const block = (fromChunk?: string) => {
+        replaced = true;
+        const texts = fromChunk ? extractVideoBlockTexts(fromChunk) : {};
+        return buildVideoHtmlBlock(mediaSrc, texts) + '\n';
+    };
 
-    // VideoJS wrapper: <div ... class="...video-js..." id="video"...>...</div>
-    const vjsRe =
-        /<div\b[^>]*(?:class\s*=\s*["'][^"']*video-js[^"']*["'][^>]*id\s*=\s*["']video["']|id\s*=\s*["']video["'][^>]*class\s*=\s*["'][^"']*video-js[^"']*["'])[^>]*>[\s\S]*?<\/div>\s*(?:<\/div>\s*)?/i;
-    if (vjsRe.test(next)) {
-        next = next.replace(vjsRe, () => {
-            replaced = true;
-            return buildVideoHtmlBlock(mediaSrc) + '\n';
-        });
-    }
-
-    // Hermes
-    if (!replaced && /embedpvideo|data-hermes-video|lv-wrapper/i.test(next)) {
-        const sectionRe = /<section\b[^>]*class\s*=\s*["'][^"']*section-video[^"']*["'][^>]*>[\s\S]*?<\/section>/i;
-        if (sectionRe.test(next)) {
-            next = next.replace(sectionRe, () => {
-                replaced = true;
-                return buildVideoHtmlBlock(mediaSrc) + '\n';
-            });
-        } else {
-            const embedRe = /<div\b[^>]*(?:embedpvideo|data-hermes-video)[^>]*>[\s\S]*?<\/div>/i;
-            if (embedRe.test(next)) {
-                next = next.replace(embedRe, () => {
-                    replaced = true;
-                    return buildVideoHtmlBlock(mediaSrc) + '\n';
-                });
+    // Prefer balanced section.section-video
+    {
+        const openRe = /<section\b[^>]*class\s*=\s*["'][^"']*section-video[^"']*["'][^>]*>/gi;
+        const m = openRe.exec(next);
+        if (m) {
+            const end = findBalancedClose(next, m.index, 'section');
+            if (end !== null) {
+                next = next.slice(0, m.index) + block(next.slice(m.index, end)) + next.slice(end);
+                return { html: next, replaced };
             }
         }
     }
 
-    // уже есть container_video — только поправить source
-    if (/id\s*=\s*["']container_video["']/i.test(next)) {
+    // VideoJS wrapper
+    {
+        const openRe =
+            /<div\b[^>]*(?:class\s*=\s*["'][^"']*video-js[^"']*["'][^>]*id\s*=\s*["']video["']|id\s*=\s*["']video["'][^>]*class\s*=\s*["'][^"']*video-js[^"']*["']|class\s*=\s*["'][^"']*video-js[^"']*["'])[^>]*>/gi;
+        const m = openRe.exec(next);
+        if (m) {
+            const end = findBalancedClose(next, m.index, 'div');
+            if (end !== null) {
+                // для текстов лучше взять окружающую section, если есть
+                let chunk = next.slice(m.index, end);
+                const before = next.slice(0, m.index);
+                const secOpen = before.toLowerCase().lastIndexOf('<section');
+                if (secOpen >= 0) {
+                    const secEnd = findBalancedClose(next, secOpen, 'section');
+                    if (secEnd !== null && secEnd >= end) {
+                        chunk = next.slice(secOpen, secEnd);
+                        next = next.slice(0, secOpen) + block(chunk) + next.slice(secEnd);
+                        return { html: next, replaced };
+                    }
+                }
+                next = next.slice(0, m.index) + block(chunk) + next.slice(end);
+                return { html: next, replaced };
+            }
+        }
+    }
+
+    // Hermes embed
+    if (/embedpvideo|data-hermes-video|lv-wrapper/i.test(next)) {
+        const openRe = /<div\b[^>]*(?:embedpvideo|data-hermes-video)[^>]*>/gi;
+        const m = openRe.exec(next);
+        if (m) {
+            const end = findBalancedClose(next, m.index, 'div');
+            if (end !== null) {
+                const before = next.slice(0, m.index);
+                const secOpen = before.toLowerCase().lastIndexOf('<section');
+                if (secOpen >= 0) {
+                    const secEnd = findBalancedClose(next, secOpen, 'section');
+                    if (secEnd !== null && secEnd >= end) {
+                        next =
+                            next.slice(0, secOpen) +
+                            block(next.slice(secOpen, secEnd)) +
+                            next.slice(secEnd);
+                        return { html: next, replaced };
+                    }
+                }
+                next = next.slice(0, m.index) + block(next.slice(m.index, end)) + next.slice(end);
+                return { html: next, replaced };
+            }
+        }
+    }
+
+    // уже есть НАШ Adway container_video — только поправить source
+    // чужие ленды часто ставят id="container_video" на section + VideoJS — их не трогаем здесь
+    const hasOurAdway =
+        /id\s*=\s*["']container_video["']/i.test(next) &&
+        /id\s*=\s*["']video-overlay["']/i.test(next) &&
+        !/vjs-|video-js|embedpvideo|data-hermes-video/i.test(next);
+    if (hasOurAdway) {
         next = next.replace(
             /(<source\b[^>]*\bsrc\s*=\s*["'])([^"']+)(["'][^>]*>)/gi,
             (full, a, src, c) => {
@@ -346,20 +425,24 @@ function replacePlayerBlocks(html: string, mediaSrc: string): { html: string; re
     // голый <video>...</video>
     const bareVideoRe = /<video\b[^>]*>[\s\S]*?<\/video>/i;
     if (!replaced && bareVideoRe.test(next)) {
-        next = next.replace(bareVideoRe, () => {
+        next = next.replace(bareVideoRe, match => {
             replaced = true;
-            return buildVideoHtmlBlock(mediaSrc);
+            // взять чуть контекста вокруг для надписей (оверлеи рядом)
+            const idx = next.indexOf(match);
+            const ctx = next.slice(Math.max(0, idx - 2500), idx + match.length + 2500);
+            return buildVideoHtmlBlock(mediaSrc, extractVideoBlockTexts(ctx));
         });
     }
 
     // нет video вообще, но есть media файл — вставить перед формой или перед </body>
     if (!replaced && !/<video\b/i.test(next)) {
-        const block = buildVideoHtmlBlock(mediaSrc) + '\n';
+        const texts = extractVideoBlockTexts(next);
+        const newBlock = buildVideoHtmlBlock(mediaSrc, texts) + '\n';
         if (/<form\b/i.test(next)) {
-            next = next.replace(/<form\b/i, `${block}\n<form`);
+            next = next.replace(/<form\b/i, `${newBlock}\n<form`);
             replaced = true;
         } else if (/<\/body>/i.test(next)) {
-            next = next.replace(/<\/body>/i, `${block}\n</body>`);
+            next = next.replace(/<\/body>/i, `${newBlock}\n</body>`);
             replaced = true;
         }
     }

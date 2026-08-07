@@ -852,6 +852,20 @@ export class AdwayCodeActionProvider implements vscode.CodeActionProvider {
                         'fixLocalPath'
                     ));
                     break;
+                case AdwayDiagnosticCodes.extensionless: {
+                    const fixExt = new vscode.CodeAction(
+                        'Adway: Восстановить расширения ассетов (PNG/SVG/MP4…)',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    fixExt.diagnostics = [diagnostic];
+                    fixExt.isPreferred = true;
+                    fixExt.command = {
+                        command: 'adway.fixExtensionlessAssets',
+                        title: 'Восстановить расширения'
+                    };
+                    actions.push(fixExt);
+                    break;
+                }
                 case AdwayDiagnosticCodes.scriptUnconnected: {
                     const connect = new vscode.CodeAction(
                         'Adway: Подключить скрипт в HTML',

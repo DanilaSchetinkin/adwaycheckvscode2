@@ -232,14 +232,279 @@ const DEFAULT_TEXTS: VideoBlockTexts = {
     closeImg: 'images/2.svg'
 };
 
-/** HTML-блок #container_video (тексты CTA — плейсхолдеры). */
+function escapeHtmlText(s: string): string {
+    return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function decodeBasicEntities(s: string): string {
+    return s
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/g, "'");
+}
+
+function stripTagsToText(html: string): string {
+    return decodeBasicEntities(
+        html
+            .replace(/<br\s*\/?>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+    );
+}
+
+/** Тексты внутри блока с id=… (h2–h4 и p — как в notification#play). */
+function headingsInId(html: string, id: string, tags = 'h2|h3|h4|p'): string[] {
+    const idRe = new RegExp(`id\\s*=\\s*["']${id}["']`, 'i');
+    const idMatch = idRe.exec(html);
+    if (!idMatch || idMatch.index === undefined) {
+        return [];
+    }
+    // назад к началу тега
+    const openStart = html.lastIndexOf('<', idMatch.index);
+    if (openStart < 0) {
+        return [];
+    }
+    const tagNameMatch = html.slice(openStart).match(/^<(\w+)/);
+    if (!tagNameMatch) {
+        return [];
+    }
+    const tag = tagNameMatch[1];
+    // упрощённый баланс для div/section
+    const openRe = new RegExp(`<${tag}\\b[^>]*>`, 'gi');
+    const closeRe = new RegExp(`</${tag}\\s*>`, 'gi');
+    openRe.lastIndex = openStart;
+    const first = openRe.exec(html);
+    if (!first || first.index !== openStart) {
+        return [];
+    }
+    let depth = 1;
+    let pos = openStart + first[0].length;
+    let end = -1;
+    while (depth > 0 && pos < html.length) {
+        openRe.lastIndex = pos;
+        closeRe.lastIndex = pos;
+        const nextOpen = openRe.exec(html);
+        const nextClose = closeRe.exec(html);
+        if (!nextClose) {
+            break;
+        }
+        if (nextOpen && nextOpen.index < nextClose.index) {
+            depth += 1;
+            pos = nextOpen.index + nextOpen[0].length;
+        } else {
+            depth -= 1;
+            pos = nextClose.index + nextClose[0].length;
+            if (depth === 0) {
+                end = nextClose.index;
+            }
+        }
+    }
+    if (end < 0) {
+        return [];
+    }
+    const inner = html.slice(openStart + first[0].length, end);
+    const headingRe = new RegExp(`<(${tags})\\b[^>]*>([\\s\\S]*?)</\\1>`, 'gi');
+    const out: string[] = [];
+    let hm: RegExpExecArray | null;
+    while ((hm = headingRe.exec(inner)) !== null) {
+        const t = stripTagsToText(hm[2]);
+        if (t && t.length >= 2 && !isPlayerUiNoise(t)) {
+            out.push(t);
+        }
+    }
+    return out;
+}
+
+function allHeadings(html: string): string[] {
+    const headingRe = /<(h[1-4]|p)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+    const out: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = headingRe.exec(html)) !== null) {
+        const t = stripTagsToText(m[2]);
+        if (t && t.length >= 2 && t.length < 200 && !isPlayerUiNoise(t)) {
+            out.push(t);
+        }
+    }
+    return out;
+}
+
+/** Служебные подписи VideoJS / aria — не CTA лендинга. */
+function isPlayerUiNoise(t: string): boolean {
+    return /^(play\s*video|pause|unmute|mute|fullscreen|skip\b|stream\s*type|current\s*time|duration|remaining|loaded|live|chapters|subtitles|descriptions|picture-in-picture|modal|reset|done|white|black|opaque|transparent|semi-transparent|video\s*player\s*is\s*loading|seek\s*to\s*live|close\s*modal|this\s*is\s*a\s*modal|beginning\s*of\s*dialog|end\s*of\s*dialog|captions|opacity|color|font\s*size|text\s*edge|font\s*family|proportional|monospace|restore\s*all|opens\s*subtitles|selected)\b/i.test(
+        t.trim()
+    );
+}
+
+function pickByHint(texts: string[], hints: RegExp[]): string | undefined {
+    for (const h of hints) {
+        const found = texts.find(t => h.test(t));
+        if (found) {
+            return found;
+        }
+    }
+    return undefined;
+}
+
+/**
+ * Достаёт надписи из старого/похожего видео-блока, чтобы сохранить при замене на Adway-плеер.
+ * Сначала #open-video / #play / #popup (бесплатный шаблон), иначе эвристика по заголовкам.
+ */
+export function extractVideoBlockTexts(html: string): Partial<VideoBlockTexts> {
+    const out: Partial<VideoBlockTexts> = {};
+
+    const openHs = headingsInId(html, 'open-video');
+    if (openHs[0]) {
+        out.openContinue = openHs[0];
+    }
+
+    const playHs = headingsInId(html, 'play');
+    if (playHs[0]) {
+        out.playLine1 = playHs[0];
+    }
+    if (playHs[1]) {
+        out.playLine2 = playHs[1];
+    }
+
+    const popupHs = [...headingsInId(html, 'popup')];
+    if (popupHs[0]) {
+        out.popupLine1 = popupHs[0];
+    }
+    if (popupHs[1]) {
+        out.popupLine2 = popupHs[1];
+    }
+
+    // notification без id=play, но class=notification
+    if (!out.playLine1) {
+        const notif = html.match(
+            /class\s*=\s*["'][^"']*notification[^"']*["'][^>]*>([\s\S]*?)<\/div>/i
+        );
+        if (notif) {
+            const ps = allHeadings(notif[0]);
+            if (ps[0]) {
+                out.playLine1 = ps[0];
+            }
+            if (ps[1]) {
+                out.playLine2 = ps[1];
+            }
+        }
+    }
+
+    const closeBlock = headingsInId(html, 'close'); // may be empty — still find img via regex near id=close
+    void closeBlock;
+    const closeImg = html.match(
+        /id\s*=\s*["']close["'][\s\S]{0,400}?src\s*=\s*["']([^"']+)["']/i
+    );
+    if (closeImg?.[1] && !/^https?:/i.test(closeImg[1]) && !closeImg[1].startsWith('data:')) {
+        out.closeImg = closeImg[1].replace(/^\.\//, '');
+    }
+
+    // эвристика, если id-блоков нет (Hermes / кастом)
+    if (!out.openContinue || !out.playLine1 || !out.popupLine1) {
+        const all = allHeadings(html);
+        if (!out.openContinue) {
+            out.openContinue = pickByHint(all, [
+                /continu/i,
+                /продолж|nastavi|nastav/i,
+                /click\s+to/i,
+                /нажм|kliknite|klikni/i,
+                /далее|dalje/i
+            ]);
+        }
+        if (!out.playLine2) {
+            out.playLine2 = pickByHint(all, [
+                /unmute|sound|звук|slušaj|slušajte|slušati|vključ.*zvok|bez\s*zvuk/i
+            ]);
+        }
+        if (!out.playLine1) {
+            out.playLine1 = pickByHint(all, [
+                /already\s+started|начал|počeo|poceo|zacel|воспроизв|playing|video\s+has|film\s+je/i
+            ]);
+        }
+        if (!out.popupLine1) {
+            out.popupLine1 = pickByHint(all, [
+                /stock|остал|limited|осталось|left\b|спеш/i
+            ]);
+        }
+        if (!out.popupLine2) {
+            out.popupLine2 = pickByHint(all, [/order|заказ|купить|buy\s*now|order\s*now/i]);
+        }
+        // если всё ещё пусто — первые осмысленные заголовки по порядку
+        const unused = all.filter(
+            t =>
+                t !== out.openContinue &&
+                t !== out.playLine1 &&
+                t !== out.playLine2 &&
+                t !== out.popupLine1 &&
+                t !== out.popupLine2
+        );
+        if (!out.playLine1 && unused[0]) {
+            out.playLine1 = unused.shift();
+        }
+        if (!out.playLine2 && unused[0]) {
+            out.playLine2 = unused.shift();
+        }
+        if (!out.popupLine1 && unused[0]) {
+            out.popupLine1 = unused.shift();
+        }
+        if (!out.popupLine2 && unused[0]) {
+            out.popupLine2 = unused.shift();
+        }
+        if (!out.openContinue && unused[0]) {
+            out.openContinue = unused.shift();
+        }
+    }
+
+    // убрать undefined / пустые
+    const clean: Partial<VideoBlockTexts> = {};
+    for (const key of Object.keys(out) as Array<keyof VideoBlockTexts>) {
+        const v = out[key];
+        if (typeof v === 'string' && v.trim()) {
+            (clean as Record<string, string>)[key] = v.trim();
+        }
+    }
+    return clean;
+}
+
+export function describePreservedTexts(texts: Partial<VideoBlockTexts>): string[] {
+    const lines: string[] = [];
+    if (texts.openContinue) {
+        lines.push(`open: «${texts.openContinue}»`);
+    }
+    if (texts.playLine1 || texts.playLine2) {
+        lines.push(`play: «${[texts.playLine1, texts.playLine2].filter(Boolean).join(' / ')}»`);
+    }
+    if (texts.popupLine1 || texts.popupLine2) {
+        lines.push(`popup: «${[texts.popupLine1, texts.popupLine2].filter(Boolean).join(' / ')}»`);
+    }
+    if (texts.closeImg) {
+        lines.push(`close: ${texts.closeImg}`);
+    }
+    return lines;
+}
+
+/** HTML-блок #container_video (тексты CTA — из старого плеера или дефолт). */
 export function buildVideoHtmlBlock(
     mediaSrc = 'media/video.mp4',
     texts: Partial<VideoBlockTexts> = {}
 ): string {
     const t = { ...DEFAULT_TEXTS, ...texts };
+    const e = {
+        openContinue: escapeHtmlText(t.openContinue),
+        playLine1: escapeHtmlText(t.playLine1),
+        playLine2: escapeHtmlText(t.playLine2),
+        popupLine1: escapeHtmlText(t.popupLine1),
+        popupLine2: escapeHtmlText(t.popupLine2)
+    };
     const closeInner = t.closeImg
-        ? `\n    <img src="${t.closeImg}" alt="" loading="lazy">`
+        ? `\n    <img src="${escapeHtmlText(t.closeImg)}" alt="" loading="lazy">`
         : '';
     return `<div id="container_video">
   <div id="video-overlay"></div>
@@ -247,19 +512,19 @@ export function buildVideoHtmlBlock(
   </div>
   <div id="open-video">
     <div>
-      <h4>${t.openContinue}</h4>
+      <h4>${e.openContinue}</h4>
     </div>
   </div>
   <div id="popup">
     <div>
-      <h2>${t.popupLine1}</h2>
-      <h2>${t.popupLine2}</h2>
+      <h2>${e.popupLine1}</h2>
+      <h2>${e.popupLine2}</h2>
     </div>
   </div>
   <div id="play">
     <div>
-      <h4>${t.playLine1}</h4>
-      <h4>${t.playLine2}</h4>
+      <h4>${e.playLine1}</h4>
+      <h4>${e.playLine2}</h4>
     </div>
   </div>
   <video id="video" autoplay muted playsinline preload="metadata">
