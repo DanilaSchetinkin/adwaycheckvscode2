@@ -231,7 +231,7 @@
       },
       {
         "command": "adway.downloadExternalImages",
-        "title": "Adway: Скачать внешние изображения",
+        "title": "Adway: Скачать внешние изображения и шрифты",
         "icon": "$(cloud-download)"
       },
       {
@@ -367,8 +367,7 @@
       {
         "command": "adway.checkLanding",
         "key": "ctrl+alt+a",
-        "mac": "cmd+alt+a",
-        "when": "editorLangId == html"
+        "mac": "cmd+alt+a"
       },
       {
         "command": "adway.cleanupLanding",
@@ -551,12 +550,12 @@
         },
         {
           "command": "adway.downloadExternalImages",
-          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.externalImage'",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.externalImage' || adwayFixCode == 'adway.externalFont')",
           "group": "adway_fix@1"
         },
         {
           "command": "adway.openExternalImages",
-          "when": "webviewId == 'adwayResults' && adwayFixCode == 'adway.externalImage'",
+          "when": "webviewId == 'adwayResults' && (adwayFixCode == 'adway.externalImage' || adwayFixCode == 'adway.externalFont')",
           "group": "adway_fix@2"
         }
       ],
@@ -565,11 +564,20 @@
           "command": "adway.initProjectStructure",
           "group": "adway@1",
           "when": "explorerResourceIsFolder"
+        },
+        {
+          "command": "adway.checkLanding",
+          "group": "adway@2",
+          "when": "explorerResourceIsFolder || resourceExtname == .html || resourceExtname == .htm || resourceExtname == .css || resourceExtname == .js"
+        },
+        {
+          "command": "adway.downloadExternalImages",
+          "group": "adway@3",
+          "when": "explorerResourceIsFolder || resourceExtname == .html || resourceExtname == .htm || resourceExtname == .css"
         }
       ],
       "editor/context": [
         {
-          "when": "editorLangId == html",
           "command": "adway.checkLanding",
           "group": "adway@1"
         },

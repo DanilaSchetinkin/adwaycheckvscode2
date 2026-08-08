@@ -157,9 +157,9 @@ export class AdwayResultsTreeProvider implements vscode.TreeDataProvider<TreeNod
             return [{ kind: 'empty', label: 'Откройте HTML-файл' }];
         }
 
-        const diags = this.diagnostics.getDiagnostics(uri);
+        const all = this.diagnostics.getIssueEntries(uri);
         if (!element) {
-            if (diags.length === 0) {
+            if (all.length === 0) {
                 return [{ kind: 'empty', label: 'Adway: OK — проблем нет' }];
             }
 
@@ -167,7 +167,7 @@ export class AdwayResultsTreeProvider implements vscode.TreeDataProvider<TreeNod
             for (const id of GROUP_ORDER) {
                 counts.set(id, 0);
             }
-            for (const d of diags) {
+            for (const { diagnostic: d } of all) {
                 const id = classifyResultMessage(d.message);
                 counts.set(id, (counts.get(id) || 0) + 1);
             }
@@ -184,14 +184,14 @@ export class AdwayResultsTreeProvider implements vscode.TreeDataProvider<TreeNod
             return [];
         }
 
-        return diags
-            .filter(d => classifyResultMessage(d.message) === element.groupId)
-            .map(d => ({
+        return all
+            .filter(({ diagnostic: d }) => classifyResultMessage(d.message) === element.groupId)
+            .map(({ uri: issueUri, diagnostic: d }) => ({
                 kind: 'issue' as const,
                 groupId: element.groupId,
                 message: stripHtml(d.message).replace(/[✅❌⚠️]/g, '').trim() || d.message,
                 severity: d.severity,
-                uri,
+                uri: issueUri,
                 line: d.range.start.line
             }));
     }

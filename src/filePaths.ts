@@ -21,7 +21,7 @@ const JS_EXT = new Set(['.js', '.mjs', '.cjs']);
 const VIDEO_EXT = new Set(['.mp4', '.webm', '.ogg', '.mov', '.m4v', '.avi', '.mkv']);
 
 /** Папки проекта Adway */
-export const ASSET_FOLDERS = ['images', 'css', 'js', 'media'] as const;
+export const ASSET_FOLDERS = ['images', 'css', 'js', 'media', 'fonts'] as const;
 
 const SKIP_WALK_DIRS = new Set([
     '.git',
@@ -267,7 +267,7 @@ function toRel(fromDir: string, targetAbs: string): string {
 }
 
 /** Список локальных CSS: из <link> + все файлы в css/ */
-function collectLocalCssFiles(html: string, htmlDir: string): string[] {
+export function collectLocalCssFiles(html: string, htmlDir: string): string[] {
     const set = new Set<string>();
 
     const linkRe = /<link\b([^>]*)>/gi;

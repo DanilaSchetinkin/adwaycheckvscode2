@@ -1,4 +1,5 @@
 import { JSDOM } from 'jsdom';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { findMissingLocalPaths } from './filePaths';
@@ -8,6 +9,7 @@ import { checkScriptAssets } from './scriptAssets';
 import { detectVideoLandingIssues } from './videoPlayer';
 import { readSheetsConfig, validateSidCountry } from './sheets';
 import { checkUnusedScripts } from './unusedScripts';
+import { collectLocalCssExternalAssets } from './downloadAssets';
 
 /** true = ok, false = error, 'warning' = warning (как в Chrome) */
 export type CheckSuccess = boolean | 'warning';
@@ -17,6 +19,11 @@ export interface CheckResult {
     text: string;
     /** 0-based line for Problems / jump */
     line?: number;
+    /**
+     * Относительный путь от папки HTML (напр. css/style.css).
+     * Если задан — переход из панели открывает этот файл, а не HTML.
+     */
+    file?: string;
     severity?: vscode.DiagnosticSeverity;
 }
 
@@ -180,7 +187,8 @@ function pushAtLine(
     results: CheckResult[],
     success: CheckSuccess,
     text: string,
-    line?: number
+    line?: number,
+    file?: string
 ): void {
     let severity: vscode.DiagnosticSeverity | undefined;
     if (success === false) {
@@ -188,7 +196,21 @@ function pushAtLine(
     } else if (success === 'warning') {
         severity = vscode.DiagnosticSeverity.Warning;
     }
-    results.push({ success, text, line, severity });
+    results.push({ success, text, line, file, severity });
+}
+
+/** Строка (0-based) первого вхождения search в тексте файла. */
+function lineInFile(content: string, ...needles: string[]): number | undefined {
+    for (const needle of needles) {
+        if (!needle) {
+            continue;
+        }
+        const idx = content.indexOf(needle);
+        if (idx >= 0) {
+            return content.substring(0, idx).split('\n').length - 1;
+        }
+    }
+    return undefined;
 }
 
 function isInComment(html: string, position: number): boolean {
@@ -849,6 +871,58 @@ function checkHrefAttributes(document: Document, results: CheckResult[], whiteli
     });
 }
 
+/** Внешние url() в локальных CSS: картинки — ошибка, шрифты — предупреждение. */
+function checkLocalCssExternalAssets(
+    results: CheckResult[],
+    html: string,
+    htmlDir: string,
+    whitelist: string[]
+): void {
+    for (const asset of collectLocalCssExternalAssets(html, htmlDir)) {
+        const isWhitelisted =
+            whitelist.some(domain => asset.url.includes(domain)) ||
+            asset.url.includes('cdnjs.cloudflare.com');
+        if (isWhitelisted) {
+            continue;
+        }
+
+        let cssLine: number | undefined;
+        try {
+            const cssAbs = path.join(htmlDir, asset.cssFile);
+            const cssText = fs.readFileSync(cssAbs, 'utf8');
+            cssLine = lineInFile(cssText, asset.search, asset.rawUrl, asset.url);
+        } catch {
+            // ignore
+        }
+
+        if (asset.kind === 'image') {
+            pushAtLine(
+                results,
+                false,
+                `❌ Внешнее изображение в <span class="value-highlight">${escapeHtml(asset.cssFile)}</span>: url(<span class="value-highlight">"${escapeHtml(asset.rawUrl)}"</span>) — скачайте в images/ (Adway: Скачать внешние изображения)`,
+                cssLine,
+                asset.cssFile
+            );
+        } else if (asset.kind === 'font') {
+            pushAtLine(
+                results,
+                false,
+                `❌ Внешний шрифт в <span class="value-highlight">${escapeHtml(asset.cssFile)}</span>: url(<span class="value-highlight">"${escapeHtml(asset.rawUrl)}"</span>) — скачайте в fonts/ (Adway: Скачать внешние изображения)`,
+                cssLine,
+                asset.cssFile
+            );
+        } else {
+            pushAtLine(
+                results,
+                'warning',
+                `⚠️ Внешний url() в <span class="value-highlight">${escapeHtml(asset.cssFile)}</span>: <span class="value-highlight">"${escapeHtml(asset.rawUrl)}"</span>`,
+                cssLine,
+                asset.cssFile
+            );
+        }
+    }
+}
+
 async function checkExternalResources(
     document: Document,
     results: CheckResult[],
@@ -1167,6 +1241,9 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
         }
 
         checkHrefAttributes(document, results, whitelist, html);
+        if (options.htmlDir) {
+            checkLocalCssExternalAssets(results, html, options.htmlDir, whitelist);
+        }
         await checkExternalResources(document, results, whitelist, html, baseUrl, options.fetchResource);
 
         if (options.checkUnusedScripts !== false) {
@@ -1220,22 +1297,22 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
                 const inCss = issue.cssFile
                     ? ` в <span class="value-highlight">${escapeHtml(issue.cssFile)}</span>`
                     : '';
-                if (issue.suggestedUrl) {
-                    push(
-                        results,
-                        false,
-                        `❌ Неверный путь${inCss}: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> — файл найден как <span class="value-highlight">"${escapeHtml(issue.suggestedUrl)}"</span>`,
-                        html,
-                        issue.cssFile ? issue.cssFile : issue.search
-                    );
+                const msg = issue.suggestedUrl
+                    ? `❌ Неверный путь${inCss}: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> — файл найден как <span class="value-highlight">"${escapeHtml(issue.suggestedUrl)}"</span>`
+                    : `❌ Файл не найден${inCss}: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> (искали в корне, images/, css/, js/, media/ и вложенных)`;
+
+                if (issue.cssFile) {
+                    let cssLine: number | undefined;
+                    try {
+                        const cssAbs = path.join(options.htmlDir, issue.cssFile);
+                        const cssText = fs.readFileSync(cssAbs, 'utf8');
+                        cssLine = lineInFile(cssText, issue.search, issue.url);
+                    } catch {
+                        // файл CSS могли удалить между сканом и чтением
+                    }
+                    pushAtLine(results, false, msg, cssLine, issue.cssFile);
                 } else {
-                    push(
-                        results,
-                        false,
-                        `❌ Файл не найден${inCss}: <span class="value-highlight">"${escapeHtml(issue.url)}"</span> (искали в корне, images/, css/, js/, media/ и вложенных)`,
-                        html,
-                        issue.cssFile ? issue.cssFile : issue.search
-                    );
+                    push(results, false, msg, html, issue.search);
                 }
             }
 

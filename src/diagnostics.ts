@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { LandingChecker, stripHtml } from './checker';
 
@@ -23,6 +24,7 @@ export const AdwayDiagnosticCodes = {
     localPath: 'adway.localPath',
     extensionless: 'adway.extensionless',
     externalImage: 'adway.externalImage',
+    externalFont: 'adway.externalFont',
     externalCss: 'adway.externalCss',
     externalJs: 'adway.externalJs',
     scriptMissing: 'adway.script.missing',
@@ -80,6 +82,9 @@ export function detectCode(text: string): string | undefined {
     }
     if (t.includes('внешнее изображение')) {
         return AdwayDiagnosticCodes.externalImage;
+    }
+    if (t.includes('внешний шрифт')) {
+        return AdwayDiagnosticCodes.externalFont;
     }
     if (t.includes('внешний css')) {
         return AdwayDiagnosticCodes.externalCss;
@@ -227,6 +232,11 @@ export function getFixesForCode(code: string | undefined): ResultFixAction[] {
                 { label: 'Скачать изображение(я) в images/', command: 'adway.downloadExternalImages' },
                 { label: 'Открыть в браузере (Save as)', command: 'adway.openExternalImages' }
             ];
+        case AdwayDiagnosticCodes.externalFont:
+            return [
+                { label: 'Скачать шрифт(ы) в fonts/', command: 'adway.downloadExternalImages' },
+                { label: 'Открыть в браузере (Save as)', command: 'adway.openExternalImages' }
+            ];
         case AdwayDiagnosticCodes.externalCss:
         case AdwayDiagnosticCodes.externalJs:
             return [];
@@ -264,6 +274,8 @@ export class AdwayDiagnostics {
     private readonly _onDidUpdate = new vscode.EventEmitter<DiagnosticsUpdatedEvent>();
     readonly onDidUpdate = this._onDidUpdate.event;
     private generation = 0;
+    /** HTML → доп. URI (CSS и т.п.), куда писали диагностики этой проверки */
+    private relatedUris = new Map<string, vscode.Uri[]>();
 
     constructor() {
         this.diagnosticCollection = vscode.languages.createDiagnosticCollection('adway');
@@ -298,6 +310,13 @@ export class AdwayDiagnostics {
 
         const config = vscode.workspace.getConfiguration('adway');
         const enabled = config.get<boolean>('enableDiagnostics', true);
+        const htmlKey = document.uri.toString();
+
+        // сбросить прошлые CSS-диагностики этой HTML-проверки
+        for (const u of this.relatedUris.get(htmlKey) || []) {
+            this.diagnosticCollection.delete(u);
+        }
+        this.relatedUris.delete(htmlKey);
 
         if (!enabled) {
             this.diagnosticCollection.delete(document.uri);
@@ -314,22 +333,26 @@ export class AdwayDiagnostics {
             return;
         }
 
-        const diagnostics: vscode.Diagnostic[] = [];
+        const htmlDir = path.dirname(document.uri.fsPath);
+        const byUri = new Map<string, { uri: vscode.Uri; diags: vscode.Diagnostic[] }>();
+        const ensure = (uri: vscode.Uri) => {
+            const k = uri.toString();
+            let entry = byUri.get(k);
+            if (!entry) {
+                entry = { uri, diags: [] };
+                byUri.set(k, entry);
+            }
+            return entry;
+        };
+        ensure(document.uri);
+
         let errorCount = 0;
         let warningCount = 0;
 
-        results.forEach(result => {
+        for (const result of results) {
             if (result.success === true) {
-                return;
+                continue;
             }
-
-            const line = result.line ?? 0;
-            const maxLine = Math.max(0, document.lineCount - 1);
-            const safeLine = Math.min(line, maxLine);
-            const range = new vscode.Range(
-                new vscode.Position(safeLine, 0),
-                new vscode.Position(safeLine, document.lineAt(safeLine).text.length)
-            );
 
             const isWarning = result.success === 'warning';
             const severity =
@@ -343,21 +366,65 @@ export class AdwayDiagnostics {
             }
 
             const message = stripHtml(result.text).replace(/[✅❌⚠️]/g, '').trim();
+            let targetUri = document.uri;
+            let targetDoc: vscode.TextDocument = document;
+
+            if (result.file) {
+                const abs = path.resolve(htmlDir, result.file);
+                const cssUri = vscode.Uri.file(abs);
+                try {
+                    targetDoc = await vscode.workspace.openTextDocument(cssUri);
+                    targetUri = cssUri;
+                } catch {
+                    targetUri = document.uri;
+                    targetDoc = document;
+                }
+            }
+
+            const line = result.line ?? 0;
+            const maxLine = Math.max(0, targetDoc.lineCount - 1);
+            const safeLine = Math.min(Math.max(0, line), maxLine);
+            const range = new vscode.Range(
+                new vscode.Position(safeLine, 0),
+                new vscode.Position(safeLine, targetDoc.lineAt(safeLine).text.length)
+            );
+
             const diagnostic = new vscode.Diagnostic(range, message, severity);
             diagnostic.source = 'Adway Checker';
             const code = detectCode(message);
             if (code) {
                 diagnostic.code = code;
             }
-            diagnostics.push(diagnostic);
-        });
+            ensure(targetUri).diags.push(diagnostic);
+        }
 
-        this.diagnosticCollection.set(document.uri, diagnostics);
+        const related: vscode.Uri[] = [];
+        for (const { uri, diags } of byUri.values()) {
+            this.diagnosticCollection.set(uri, diags);
+            if (uri.toString() !== htmlKey) {
+                related.push(uri);
+            }
+        }
+        this.relatedUris.set(htmlKey, related);
         this._onDidUpdate.fire({ uri: document.uri, errorCount, warningCount });
     }
 
     getDiagnostics(uri: vscode.Uri): readonly vscode.Diagnostic[] {
         return this.diagnosticCollection.get(uri) || [];
+    }
+
+    /** Диагностики HTML + связанных CSS (для дерева результатов). */
+    getIssueEntries(htmlUri: vscode.Uri): Array<{ uri: vscode.Uri; diagnostic: vscode.Diagnostic }> {
+        const out: Array<{ uri: vscode.Uri; diagnostic: vscode.Diagnostic }> = [];
+        for (const d of this.getDiagnostics(htmlUri)) {
+            out.push({ uri: htmlUri, diagnostic: d });
+        }
+        for (const u of this.relatedUris.get(htmlUri.toString()) || []) {
+            for (const d of this.getDiagnostics(u)) {
+                out.push({ uri: u, diagnostic: d });
+            }
+        }
+        return out;
     }
 
     dispose() {

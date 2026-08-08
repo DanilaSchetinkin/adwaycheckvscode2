@@ -4,19 +4,28 @@ import * as https from 'https';
 import * as http from 'http';
 import * as path from 'path';
 import { URL } from 'url';
+import { collectLocalCssFiles } from './filePaths';
+
+export type AssetKind = 'image' | 'font';
 
 export type DownloadImageResult = {
     html: string;
     downloaded: number;
-    /** Уже были в images/ — только подменили путь в HTML */
+    /** Уже были локально — только подменили путь */
     reused: number;
     skipped: number;
     failed: string[];
+    /** Почему не скачалось (для UI) */
+    failedReasons?: Array<{ url: string; reason: string }>;
     /** Удалено дублей с тем же содержимым */
     deduped: number;
     /** Имена удалённых файлов в images/ */
     dedupedFiles: string[];
     replacements: Array<{ from: string; to: string }>;
+    /** Сколько url() переписано в CSS */
+    cssUrlsFixed?: number;
+    /** CSS-файлы, в которых меняли пути */
+    cssFiles?: string[];
 };
 
 const CONTENT_TYPE_EXT: Record<string, string> = {
@@ -32,17 +41,29 @@ const CONTENT_TYPE_EXT: Record<string, string> = {
     'image/bmp': '.bmp',
     'image/x-ms-bmp': '.bmp',
     'image/avif': '.avif',
-    'image/tiff': '.tiff'
+    'image/tiff': '.tiff',
+    'font/woff': '.woff',
+    'font/woff2': '.woff2',
+    'font/ttf': '.ttf',
+    'font/otf': '.otf',
+    'application/font-woff': '.woff',
+    'application/font-woff2': '.woff2',
+    'application/x-font-woff': '.woff',
+    'application/x-font-ttf': '.ttf',
+    'application/x-font-otf': '.otf',
+    'application/vnd.ms-fontobject': '.eot'
 };
 
 const KNOWN_EXT = new Set([
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif', '.tif', '.tiff'
 ]);
 
+const FONT_EXT = new Set(['.woff', '.woff2', '.ttf', '.otf', '.eot']);
+
 const BROWSER_HEADERS = {
     'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,font/woff2,font/woff,font/*,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9'
 };
 
@@ -58,8 +79,27 @@ function normalizeUrl(url: string): string {
     return u;
 }
 
-function localPath(fileName: string): string {
-    return `images/${fileName}`.replace(/\\/g, '/');
+function localPath(fileName: string, kind: AssetKind = 'image'): string {
+    const folder = kind === 'font' ? 'fonts' : 'images';
+    return `${folder}/${fileName}`.replace(/\\/g, '/');
+}
+
+function guessAssetKind(url: string): AssetKind {
+    const clean = url.split('?')[0].split('#')[0].toLowerCase();
+    const ext = path.extname(clean);
+    if (FONT_EXT.has(ext)) {
+        return 'font';
+    }
+    return 'image';
+}
+
+function extFromContentType(contentType: string | undefined): string | undefined {
+    if (!contentType) {
+        return undefined;
+    }
+    const mime = contentType.split(';')[0].trim().toLowerCase();
+    const ext = CONTENT_TYPE_EXT[mime];
+    return ext || undefined;
 }
 
 function fileHash(buf: Buffer): string {
@@ -77,14 +117,6 @@ function uniqueFileName(dir: string, baseName: string): string {
         i += 1;
     }
     return name;
-}
-
-function extFromContentType(contentType: string | undefined): string | undefined {
-    if (!contentType) {
-        return undefined;
-    }
-    const mime = contentType.split(';')[0].trim().toLowerCase();
-    return CONTENT_TYPE_EXT[mime];
 }
 
 function extFromMagic(buf: Buffer): string | undefined {
@@ -172,8 +204,18 @@ function downloadBuffer(
             reject(new Error('too many redirects'));
             return;
         }
+        let referer = 'https://www.google.com/';
+        try {
+            referer = new URL(url).origin + '/';
+        } catch {
+            // keep default
+        }
+        const headers = {
+            ...BROWSER_HEADERS,
+            Referer: referer
+        };
         const lib = url.startsWith('https') ? https : http;
-        const req = lib.get(url, { timeout: timeoutMs, headers: BROWSER_HEADERS }, res => {
+        const req = lib.get(url, { timeout: timeoutMs, headers }, res => {
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 const next = new URL(res.headers.location, url).href;
                 res.resume();
@@ -248,36 +290,36 @@ function isNumberedDuplicateName(name: string): boolean {
     return /_\d+$/i.test(stem);
 }
 
-/** Уже есть в images/ по имени из URL — не качаем. */
-function findExistingByUrlName(imagesDir: string, url: string): string | undefined {
+/** Уже есть в папке по имени из URL — не качаем. */
+function findExistingByUrlName(dir: string, url: string, kind: AssetKind): string | undefined {
     let fallback: string | undefined;
     for (const name of expectedNamesFromUrl(url)) {
-        const full = path.join(imagesDir, name);
+        const full = path.join(dir, name);
         if (!(fs.existsSync(full) && fs.statSync(full).isFile())) {
             continue;
         }
         if (!isNumberedDuplicateName(name)) {
-            return localPath(name);
+            return localPath(name, kind);
         }
         if (!fallback) {
-            fallback = localPath(name);
+            fallback = localPath(name, kind);
         }
     }
     return fallback;
 }
 
-function buildHashIndex(imagesDir: string): Map<string, string> {
+function buildHashIndex(dir: string, allowedExt: Set<string>): Map<string, string> {
     const map = new Map<string, string>();
-    if (!fs.existsSync(imagesDir)) {
+    if (!fs.existsSync(dir)) {
         return map;
     }
-    for (const name of fs.readdirSync(imagesDir)) {
-        const full = path.join(imagesDir, name);
+    for (const name of fs.readdirSync(dir)) {
+        const full = path.join(dir, name);
         try {
             if (!fs.statSync(full).isFile()) {
                 continue;
             }
-            if (!KNOWN_EXT.has(path.extname(name).toLowerCase())) {
+            if (!allowedExt.has(path.extname(name).toLowerCase())) {
                 continue;
             }
             const hash = fileHash(fs.readFileSync(full));
@@ -300,10 +342,11 @@ function buildHashIndex(imagesDir: string): Map<string, string> {
 
 function buildLocalFileName(
     url: string,
-    imagesDir: string,
+    destDir: string,
     contentType: string | undefined,
     contentDisposition: string | undefined,
-    buffer: Buffer
+    buffer: Buffer,
+    kind: AssetKind
 ): string {
     const fromCd = fileNameFromContentDisposition(contentDisposition);
     let stem: string;
@@ -311,7 +354,7 @@ function buildLocalFileName(
 
     if (fromCd) {
         urlExt = path.extname(fromCd).toLowerCase();
-        stem = path.basename(fromCd, path.extname(fromCd)) || 'image';
+        stem = path.basename(fromCd, path.extname(fromCd)) || (kind === 'font' ? 'font' : 'image');
     } else {
         let pathname = '';
         try {
@@ -319,7 +362,7 @@ function buildLocalFileName(
         } catch {
             pathname = url.split('?')[0];
         }
-        stem = path.basename(pathname) || 'image';
+        stem = path.basename(pathname) || (kind === 'font' ? 'font' : 'image');
         urlExt = path.extname(stem).toLowerCase();
         if (urlExt) {
             stem = path.basename(stem, path.extname(stem));
@@ -330,20 +373,30 @@ function buildLocalFileName(
         urlExt = '.jpg';
     }
     if (!stem || stem === '.' || stem === '..') {
-        stem = 'image';
+        stem = kind === 'font' ? 'font' : 'image';
     }
 
+    const allowed = kind === 'font' ? FONT_EXT : KNOWN_EXT;
     const ext =
         extFromContentType(contentType) ||
-        extFromMagic(buffer) ||
-        (KNOWN_EXT.has(urlExt) ? urlExt : undefined);
+        (kind === 'image' ? extFromMagic(buffer) : undefined) ||
+        (allowed.has(urlExt) ? urlExt : undefined) ||
+        (kind === 'font' && urlExt === '.woff2' ? '.woff2' : undefined);
 
     if (!ext) {
-        throw new Error('unknown image type');
+        // CDN без расширения / странный content-type — для картинок пробуем magic, иначе .bin недопустим
+        if (kind === 'image' && extFromMagic(buffer)) {
+            // already handled above
+        }
+        throw new Error(
+            kind === 'font'
+                ? `unknown font type (${contentType || 'no content-type'}, ext=${urlExt || 'none'})`
+                : `unknown image type (${contentType || 'no content-type'}, ext=${urlExt || 'none'})`
+        );
     }
 
     const preferred = `${stem}${ext}`;
-    const preferredPath = path.join(imagesDir, preferred);
+    const preferredPath = path.join(destDir, preferred);
     if (!fs.existsSync(preferredPath)) {
         return preferred;
     }
@@ -355,7 +408,7 @@ function buildLocalFileName(
     } catch {
         // fall through
     }
-    return uniqueFileName(imagesDir, preferred);
+    return uniqueFileName(destDir, preferred);
 }
 
 /**
@@ -534,8 +587,8 @@ export function dedupeImagesFolder(
     };
 }
 
-/** Собрать внешние URL из img[src] и srcset. */
-export function collectExternalImageUrls(html: string): string[] {
+/** Собрать внешние URL из img[src], srcset и url() в локальных CSS (картинки + шрифты). */
+export function collectExternalImageUrls(html: string, htmlDir?: string): string[] {
     const urls = new Set<string>();
     const srcRe = /<img\b[^>]*\bsrc\s*=\s*(["'])((?:(?!\1)[\s\S])*)\1/gi;
     let m: RegExpExecArray | null;
@@ -554,27 +607,55 @@ export function collectExternalImageUrls(html: string): string[] {
             }
         }
     }
+    if (htmlDir) {
+        for (const a of collectLocalCssExternalAssets(html, htmlDir)) {
+            if (a.kind === 'image' || a.kind === 'font') {
+                urls.add(a.url);
+            }
+        }
+    }
     return [...urls];
 }
 
-/** Внешний URL картинки из строки HTML / сообщения чекера. */
+/** Внешний URL картинки из строки HTML / CSS / сообщения чекера. */
 export function extractExternalImageUrlFromLine(line: string): string | undefined {
+    const clean = (u: string) =>
+        normalizeUrl(
+            u
+                .replace(/&amp;/g, '&')
+                .replace(/&quot;/g, '"')
+                .replace(/&#39;/g, "'")
+                .replace(/[),.;]+$/g, '')
+                .trim()
+        );
+
     const src = line.match(/\bsrc\s*=\s*(["'])((?:(?!\1)[\s\S])*)\1/i);
     if (src && isExternalUrl(src[2])) {
-        return normalizeUrl(src[2]);
+        return clean(src[2]);
     }
     // сообщение чекера: img src="https://..."
     const fromMsg = line.match(/img\s+src=["']([^"']+)["']/i);
     if (fromMsg && isExternalUrl(fromMsg[1])) {
-        return normalizeUrl(fromMsg[1]);
+        return clean(fromMsg[1]);
+    }
+    // сообщение / CSS: url("https://...") или url(https://...)
+    const fromUrlFn = line.match(
+        /url\(\s*(['"]?)(https?:\/\/[^'")\s]+|\/\/[^'")\s]+)\1\s*\)/i
+    );
+    if (fromUrlFn && isExternalUrl(fromUrlFn[2])) {
+        return clean(fromUrlFn[2]);
+    }
+    const quoted = line.match(/["'](https?:\/\/[^"']+)["']/i);
+    if (quoted && isExternalUrl(quoted[1])) {
+        return clean(quoted[1]);
     }
     const highlighted = line.match(/https?:\/\/[^\s"'<>]+/i);
     if (highlighted) {
-        return normalizeUrl(highlighted[0]);
+        return clean(highlighted[0]);
     }
     const protoRel = line.match(/\/\/[^\s"'<>]+/);
     if (protoRel && isExternalUrl(protoRel[0])) {
-        return normalizeUrl(protoRel[0]);
+        return clean(protoRel[0]);
     }
     return undefined;
 }
@@ -582,28 +663,189 @@ export function extractExternalImageUrlFromLine(line: string): string | undefine
 /**
  * URL внешних картинок, которые чекер помечает ошибкой
  * (не whitelist / не jQuery CDN) — те же правила, что в checker.ts.
+ * При htmlDir также смотрит url() в локальных CSS.
  */
-export function collectFlaggedExternalImageUrls(html: string, whitelist: string[] = []): string[] {
+export function collectFlaggedExternalImageUrls(
+    html: string,
+    whitelist: string[] = [],
+    htmlDir?: string
+): string[] {
     const urls = new Set<string>();
-    const srcRe = /<img\b[^>]*\bsrc\s*=\s*(["'])((?:(?!\1)[\s\S])*)\1/gi;
-    let m: RegExpExecArray | null;
-    while ((m = srcRe.exec(html)) !== null) {
-        const src = m[2].trim();
+    const isFlagged = (src: string) => {
         if (src.startsWith('data:') || src.startsWith('{') || src.includes('{')) {
-            continue;
+            return false;
         }
         if (!isExternalUrl(src)) {
-            continue;
+            return false;
         }
         const normalized = normalizeUrl(src);
         const isWhitelisted =
             whitelist.some(domain => normalized.includes(domain)) ||
             normalized.includes('cdnjs.cloudflare.com');
-        if (!isWhitelisted) {
-            urls.add(normalized);
+        return !isWhitelisted;
+    };
+
+    const srcRe = /<img\b[^>]*\bsrc\s*=\s*(["'])((?:(?!\1)[\s\S])*)\1/gi;
+    let m: RegExpExecArray | null;
+    while ((m = srcRe.exec(html)) !== null) {
+        const src = m[2].trim();
+        if (isFlagged(src)) {
+            urls.add(normalizeUrl(src));
+        }
+    }
+    if (htmlDir) {
+        for (const a of collectLocalCssExternalAssets(html, htmlDir)) {
+            if ((a.kind === 'image' || a.kind === 'font') && isFlagged(a.url)) {
+                urls.add(a.url);
+            }
         }
     }
     return [...urls];
+}
+
+export type CssExternalAsset = {
+    /** Нормализованный https URL */
+    url: string;
+    /** Как в файле (может быть //…) */
+    rawUrl: string;
+    cssFile: string;
+    search: string;
+    kind: 'image' | 'font' | 'other';
+};
+
+const CSS_IMAGE_EXT = /\.(jpe?g|png|gif|webp|svg|ico|bmp|avif|tiff?)([?#]|$)/i;
+const CSS_FONT_EXT = /\.(woff2?|ttf|otf|eot)([?#]|$)/i;
+
+function classifyCssAssetUrl(url: string): 'image' | 'font' | 'other' {
+    if (CSS_FONT_EXT.test(url)) {
+        return 'font';
+    }
+    if (CSS_IMAGE_EXT.test(url)) {
+        return 'image';
+    }
+    if (/\.(css|js|mjs|cjs|map)([?#]|$)/i.test(url)) {
+        return 'other';
+    }
+    // без расширения — часто CDN-картинка
+    if (!path.extname(url.split('?')[0].split('#')[0])) {
+        return 'image';
+    }
+    return 'other';
+}
+
+/** Внешние url() в локальных CSS (link + css/**). */
+export function collectLocalCssExternalAssets(html: string, htmlDir: string): CssExternalAsset[] {
+    const out: CssExternalAsset[] = [];
+    const seen = new Set<string>();
+
+    for (const cssRel of collectLocalCssFiles(html, htmlDir)) {
+        const cssAbs = path.normalize(path.resolve(htmlDir, cssRel));
+        if (!fs.existsSync(cssAbs)) {
+            continue;
+        }
+        let text = '';
+        try {
+            text = fs.readFileSync(cssAbs, 'utf8');
+        } catch {
+            continue;
+        }
+        const re = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+            const raw = m[2].trim();
+            if (!raw || raw.startsWith('data:') || raw.startsWith('{') || raw.includes('{')) {
+                continue;
+            }
+            if (!isExternalUrl(raw)) {
+                continue;
+            }
+            const url = normalizeUrl(raw);
+            const key = `${cssRel}::${url}`;
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            out.push({
+                url,
+                rawUrl: raw,
+                cssFile: cssRel.replace(/\\/g, '/'),
+                search: m[0],
+                kind: classifyCssAssetUrl(url)
+            });
+        }
+    }
+
+    return out;
+}
+
+/** Путь к images|fonts/file относительно папки CSS-файла. */
+export function cssRelativeAssetPath(cssFileRel: string, localFromHtmlRoot: string): string {
+    const cssDir = path.dirname(cssFileRel.replace(/\\/g, '/'));
+    const target = localFromHtmlRoot.replace(/\\/g, '/');
+    let rel = path.relative(cssDir, target).replace(/\\/g, '/');
+    if (!rel.startsWith('.')) {
+        rel = './' + rel;
+    }
+    return rel;
+}
+
+/** @deprecated use cssRelativeAssetPath */
+export function cssRelativeImagePath(cssFileRel: string, imageFileName: string): string {
+    return cssRelativeAssetPath(cssFileRel, `images/${imageFileName}`);
+}
+
+function rewriteCssExternalUrls(
+    html: string,
+    htmlDir: string,
+    urlToLocalFromHtml: Map<string, string>
+): { fixed: number; files: string[] } {
+    let fixed = 0;
+    const files: string[] = [];
+
+    for (const cssRel of collectLocalCssFiles(html, htmlDir)) {
+        const cssAbs = path.normalize(path.resolve(htmlDir, cssRel));
+        if (!fs.existsSync(cssAbs)) {
+            continue;
+        }
+        let text = '';
+        try {
+            text = fs.readFileSync(cssAbs, 'utf8');
+        } catch {
+            continue;
+        }
+        const before = text;
+        const re = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+        text = text.replace(re, (full, quote: string, rawUrl: string) => {
+            const raw = rawUrl.trim();
+            if (!isExternalUrl(raw)) {
+                return full;
+            }
+            const norm = normalizeUrl(raw);
+            const bare = norm.replace(/^https?:/, '');
+            const htmlLocal =
+                urlToLocalFromHtml.get(norm) ||
+                urlToLocalFromHtml.get(raw) ||
+                urlToLocalFromHtml.get(bare) ||
+                (bare.startsWith('//') ? urlToLocalFromHtml.get('https:' + bare) : undefined);
+            if (!htmlLocal) {
+                return full;
+            }
+            const cssLocal = cssRelativeAssetPath(cssRel, htmlLocal);
+            const q = quote || '';
+            fixed += 1;
+            return `url(${q}${cssLocal}${q})`;
+        });
+        if (text !== before) {
+            try {
+                fs.writeFileSync(cssAbs, text, 'utf8');
+                files.push(cssRel.replace(/\\/g, '/'));
+            } catch {
+                // ignore locked
+            }
+        }
+    }
+
+    return { fixed, files };
 }
 
 export type ExternalImageClassified = {
@@ -615,12 +857,13 @@ export type ExternalImageClassified = {
 };
 
 export function classifyExternalImages(html: string, htmlDir: string): ExternalImageClassified {
-    const imagesDir = path.join(htmlDir, 'images');
-    const all = collectExternalImageUrls(html);
+    const all = collectExternalImageUrls(html, htmlDir);
     const missing: string[] = [];
     const reusable: Array<{ url: string; local: string }> = [];
     for (const url of all) {
-        const local = findExistingByUrlName(imagesDir, url);
+        const kind = guessAssetKind(url);
+        const dir = path.join(htmlDir, kind === 'font' ? 'fonts' : 'images');
+        const local = findExistingByUrlName(dir, url, kind);
         if (local) {
             reusable.push({ url, local });
         } else {
@@ -643,16 +886,16 @@ function mapUrlVariants(urlToLocal: Map<string, string>, url: string, local: str
 
 export type DownloadExternalImagesOptions = {
     /**
-     * Обработать только эти URL (остальные внешние в HTML не трогаем).
+     * Обработать только эти URL (остальные внешние в HTML/CSS не трогаем).
      * Если не задано — все внешние из файла.
      */
     onlyUrls?: string[];
 };
 
 /**
- * Скачивает внешние img/srcset в images/.
+ * Скачивает внешние img/srcset и url() из локальных CSS (картинки → images/, шрифты → fonts/).
  * По умолчанию не качает повторно, если файл с тем же именем уже есть.
- * В конце схлопывает байт-в-байт дубли в images/.
+ * В конце схлопывает байт-в-байт дубли в images/ и правит пути в HTML + CSS.
  */
 export async function downloadExternalImages(
     html: string,
@@ -660,26 +903,39 @@ export async function downloadExternalImages(
     options?: DownloadExternalImagesOptions
 ): Promise<DownloadImageResult> {
     const imagesDir = path.join(htmlDir, 'images');
+    const fontsDir = path.join(htmlDir, 'fonts');
     if (!fs.existsSync(imagesDir)) {
         fs.mkdirSync(imagesDir, { recursive: true });
     }
 
-    const scope = new Set(
-        (options?.onlyUrls ?? collectExternalImageUrls(html)).map(u => normalizeUrl(u))
-    );
-    const urls = collectExternalImageUrls(html).filter(u => scope.has(u));
+    const allUrls = collectExternalImageUrls(html, htmlDir);
+    // onlyUrls — качаем как есть (даже если collect их не нашёл в HTML/CSS-снимке)
+    const urls = options?.onlyUrls?.length
+        ? [...new Set(options.onlyUrls.map(u => normalizeUrl(u.trim())).filter(Boolean))]
+        : allUrls;
     let current = html;
     let downloaded = 0;
     let reused = 0;
     let skipped = 0;
     const failed: string[] = [];
+    const failedReasons: Array<{ url: string; reason: string }> = [];
     const replacements: Array<{ from: string; to: string }> = [];
     const urlToLocal = new Map<string, string>();
-    let hashIndex = buildHashIndex(imagesDir);
+    const imageHashIndex = buildHashIndex(imagesDir, KNOWN_EXT);
+    const fontHashIndex = fs.existsSync(fontsDir)
+        ? buildHashIndex(fontsDir, FONT_EXT)
+        : new Map<string, string>();
 
     for (const url of urls) {
+        const kind = guessAssetKind(url);
+        const destDir = kind === 'font' ? fontsDir : imagesDir;
+        const hashIndex = kind === 'font' ? fontHashIndex : imageHashIndex;
         try {
-            const existing = findExistingByUrlName(imagesDir, url);
+            if (kind === 'font' && !fs.existsSync(fontsDir)) {
+                fs.mkdirSync(fontsDir, { recursive: true });
+            }
+
+            const existing = findExistingByUrlName(destDir, url, kind);
             if (existing) {
                 mapUrlVariants(urlToLocal, url, existing);
                 reused += 1;
@@ -689,16 +945,24 @@ export async function downloadExternalImages(
 
             const { buffer, contentType, contentDisposition } = await downloadBuffer(url);
             if (!buffer.length) {
-                throw new Error('empty');
+                throw new Error('empty response');
             }
-            if (looksLikeNonImage(buffer, contentType) && !extFromMagic(buffer)) {
-                throw new Error('not an image');
+            if (kind === 'image') {
+                if (looksLikeNonImage(buffer, contentType) && !extFromMagic(buffer)) {
+                    // если в URL есть расширение картинки — всё равно пробуем сохранить
+                    const urlExt = path.extname(url.split('?')[0]).toLowerCase();
+                    if (!KNOWN_EXT.has(urlExt === '.jpeg' ? '.jpg' : urlExt)) {
+                        throw new Error(
+                            `not an image (${(contentType || 'no type').split(';')[0]})`
+                        );
+                    }
+                }
             }
 
             const hash = fileHash(buffer);
             const byHash = hashIndex.get(hash);
             if (byHash) {
-                const local = localPath(byHash);
+                const local = localPath(byHash, kind);
                 mapUrlVariants(urlToLocal, url, local);
                 reused += 1;
                 replacements.push({ from: url, to: local });
@@ -707,12 +971,13 @@ export async function downloadExternalImages(
 
             const fileName = buildLocalFileName(
                 url,
-                imagesDir,
+                destDir,
                 contentType,
                 contentDisposition,
-                buffer
+                buffer,
+                kind
             );
-            const dest = path.join(imagesDir, fileName);
+            const dest = path.join(destDir, fileName);
             if (!fs.existsSync(dest)) {
                 fs.writeFileSync(dest, buffer);
                 downloaded += 1;
@@ -720,11 +985,13 @@ export async function downloadExternalImages(
                 reused += 1;
             }
             hashIndex.set(hash, fileName);
-            const local = localPath(fileName);
+            const local = localPath(fileName, kind);
             mapUrlVariants(urlToLocal, url, local);
             replacements.push({ from: url, to: local });
-        } catch {
+        } catch (e: unknown) {
+            const reason = e instanceof Error ? e.message : String(e);
             failed.push(url);
+            failedReasons.push({ url, reason });
             skipped += 1;
         }
     }
@@ -740,6 +1007,7 @@ export async function downloadExternalImages(
         }
     }
 
+    const cssRewrite = rewriteCssExternalUrls(current, htmlDir, urlToLocal);
     const dedupe = dedupeImagesFolder(current, htmlDir);
 
     return {
@@ -748,8 +1016,11 @@ export async function downloadExternalImages(
         reused,
         skipped,
         failed,
+        failedReasons,
         deduped: dedupe.removed.length,
         dedupedFiles: dedupe.removed,
-        replacements
+        replacements,
+        cssUrlsFixed: cssRewrite.fixed,
+        cssFiles: cssRewrite.files
     };
 }
