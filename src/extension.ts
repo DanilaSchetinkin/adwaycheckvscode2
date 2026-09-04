@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { CheckResult, LandingChecker, stripHtml } from './checker';
 import { AdwayCodeActionProvider, buildFixEdit, FixId, fixAllLocalPathsWithCss } from './codeActions';
-import { cleanupLanding, moveLinksToHead, removeHtmlComments } from './cleanup';
+import { cleanupLanding, moveLinksToHead, fixDtimeDates, removeHtmlComments } from './cleanup';
 import {
     collectFlaggedExternalImageUrls,
     dedupeAssetFolders,
@@ -13,6 +13,7 @@ import {
 import { AdwayDiagnostics, detectCode, getFixesForCode, getFixesForMessage } from './diagnostics';
 import { normalizeAnchorHrefs } from './normalizeHrefs';
 import { AdwayResultsTreeProvider } from './resultsTree';
+import { AdwayCommandsTreeProvider } from './commandsTree';
 import {
     checkScriptAssets,
     insertScriptSrcTag,
@@ -23,6 +24,7 @@ import { initProjectStructureCommand } from './projectStructure';
 import { ONEFORM_SPAN } from './snippetTexts';
 import { SnippetProvider } from './snippets';
 import { AdwayStatusBar } from './statusBar';
+import { showAdwayCommandMenu } from './commandMenu';
 import { runFixWizard } from './fixWizard';
 import { fixExtensionlessAssets, findExtensionlessAssets } from './extensionlessAssets';
 import { setupAdwayVideoPlayer } from './videoPlayer';
@@ -31,11 +33,8 @@ import {
     buildVideoJs,
     VIDEO_CSS
 } from './videoTemplates';
-import { previewCssDiffs, previewDiffAndConfirm, registerChangePreview } from './ai/changePreview';
-import { buildPlayerReplacePlan, detectOldPlayer } from './ai/aiPlayer';
-import { checkOllamaAvailable, getOllamaConfig } from './ai/ollamaClient';
-import { getTemplatesStatus } from './ai/templatesLoader';
-import { openAdwayAiChat } from './ai/aiChatPanel';
+import { previewCssDiffs, previewDiffAndConfirm, registerChangePreview } from './changePreview';
+import { openHeaderFooterImportPanel } from './headerFooterPanel';
 
 let diagnosticsProvider: AdwayDiagnostics;
 let statusBar: AdwayStatusBar;
@@ -124,9 +123,17 @@ export function activate(context: vscode.ExtensionContext) {
             });
             return treeView;
         })(),
+        vscode.window.createTreeView('adwayCommands', {
+            treeDataProvider: new AdwayCommandsTreeProvider(),
+            showCollapseAll: true
+        }),
         vscode.commands.registerCommand('adway.focusResultsTree', () => {
             void vscode.commands.executeCommand('adwayResults.focus');
         }),
+        vscode.commands.registerCommand('adway.focusCommandsTree', () => {
+            void vscode.commands.executeCommand('adwayCommands.focus');
+        }),
+        vscode.commands.registerCommand('adway.showCommandMenu', () => showAdwayCommandMenu()),
         vscode.commands.registerCommand('adway.fixWizard', async (ctx?: unknown) => {
             const editor = await getHtmlEditorForFix(ctx);
             if (!editor) {
@@ -529,241 +536,8 @@ export function activate(context: vscode.ExtensionContext) {
                 `Adway: бесплатный видео-плеер — ${parts.slice(0, 6).join('; ') || 'готово'}`
             );
         }),
-        vscode.commands.registerCommand('adway.aiCheck', async () => {
-            const status = await checkOllamaAvailable();
-            const cfg = getOllamaConfig();
-            const templates = getTemplatesStatus();
-            const parts = [status.message, templates.message];
-            if (status.ok) {
-                vscode.window.showInformationMessage(`Adway AI: ${parts.join(' · ')}`);
-            } else {
-                vscode.window.showWarningMessage(`Adway AI: ${parts.join(' · ')}`);
-            }
-            console.log('Adway AI config', cfg, status, templates);
-        }),
-        vscode.commands.registerCommand('adway.aiChat', () => {
-            openAdwayAiChat(context);
-        }),
-        vscode.commands.registerCommand('adway.aiRemoveOldPlayer', async (ctx?: unknown) => {
-            const editor = await getHtmlEditorForFix(ctx);
-            if (!editor) {
-                vscode.window.showErrorMessage('Откройте HTML файл');
-                return;
-            }
-            const html = editor.document.getText();
-            const htmlDir =
-                editor.document.uri.scheme === 'file'
-                    ? path.dirname(editor.document.uri.fsPath)
-                    : undefined;
-
-            const detected = await vscode.window.withProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: 'Adway AI: ищем секцию старого плеера…',
-                    cancellable: false
-                },
-                async () => detectOldPlayer(html)
-            );
-
-            if (!detected.snippet) {
-                vscode.window.showInformationMessage(
-                    `Adway AI: блок плеера не найден (${detected.reason})`
-                );
-                return;
-            }
-
-            const plan = buildPlayerReplacePlan(html, detected, htmlDir);
-            if (plan.htmlAfterReplace === html) {
-                vscode.window.showErrorMessage('Adway AI: не удалось подготовить замену секции');
-                return;
-            }
-
-            type AiPlayerMode = 'replace' | 'delete';
-            let action: AiPlayerMode | undefined;
-            let cssAlreadyPreviewed = false;
-
-            const pickAction = async (title: string): Promise<AiPlayerMode | 'css' | undefined> => {
-                const item = await vscode.window.showQuickPick(
-                    [
-                        {
-                            label: 'Заменить секцию на бесплатный плеер',
-                            description: 'рекомендуется',
-                            detail: plan.summaryLines.join(' · '),
-                            id: 'replace' as const
-                        },
-                        {
-                            label: 'Только удалить секцию',
-                            description: 'без #container_video',
-                            detail: plan.summaryLines.join(' · '),
-                            id: 'delete' as const
-                        },
-                        {
-                            label: 'Сначала показать CSS-diff',
-                            description:
-                                plan.cssCleanups.length > 0
-                                    ? `${plan.cssCleanups.length} файл(ов)`
-                                    : 'правил не найдено',
-                            detail: 'Compare по CSS (как в Visual Studio)',
-                            id: 'css' as const
-                        }
-                    ],
-                    { title, placeHolder: detected.reason }
-                );
-                return item?.id;
-            };
-
-            let choice = await pickAction('Adway AI: что сделать с найденной секцией?');
-            if (!choice) {
-                return;
-            }
-            if (choice === 'css') {
-                cssAlreadyPreviewed = true;
-                if (!plan.cssCleanups.length) {
-                    vscode.window.showInformationMessage(
-                        'Adway AI: в локальных CSS правил старого плеера не найдено'
-                    );
-                } else {
-                    await previewCssDiffs(
-                        plan.cssCleanups.map(c => ({
-                            fileRel: c.fileRel,
-                            before: c.before,
-                            after: c.after,
-                            targetUri: vscode.Uri.file(c.absPath)
-                        }))
-                    );
-                }
-                const again = await vscode.window.showQuickPick(
-                    [
-                        {
-                            label: 'Заменить секцию на бесплатный плеер',
-                            id: 'replace' as const
-                        },
-                        {
-                            label: 'Только удалить секцию',
-                            id: 'delete' as const
-                        }
-                    ],
-                    { title: 'Adway AI: применить после просмотра CSS?' }
-                );
-                if (!again) {
-                    return;
-                }
-                action = again.id;
-            } else {
-                action = choice;
-            }
-
-            const proposed =
-                action === 'replace' ? plan.htmlAfterReplace : plan.htmlAfterDelete;
-            const title =
-                action === 'replace'
-                    ? 'Adway AI: HTML было ↔ будет (секция → бесплатный плеер)'
-                    : 'Adway AI: HTML было ↔ будет (удаление секции)';
-
-            const cssNote = plan.cssCleanups.length
-                ? ` + CSS (${plan.cssCleanups.map(c => c.fileRel).join(', ')})`
-                : '';
-            const okPreview = await previewDiffAndConfirm({
-                title,
-                original: html,
-                proposed,
-                language: 'html',
-                message: `${plan.summaryLines.slice(0, 3).join('\n')}${cssNote}\n\nСлева — было, справа — будет.`,
-                applyLabel: plan.cssCleanups.length ? 'Применить HTML + CSS' : 'Применить',
-                cancelLabel: 'Отмена',
-                targetUri: editor.document.uri
-            });
-            if (!okPreview) {
-                return;
-            }
-
-            let writeCss = plan.cssCleanups.length > 0;
-            if (writeCss && !cssAlreadyPreviewed) {
-                const seeCss = await vscode.window.showInformationMessage(
-                    `Показать diff CSS перед записью (${plan.cssCleanups.length})?`,
-                    'Показать',
-                    'Сразу записать',
-                    'Без CSS'
-                );
-                if (seeCss === 'Показать') {
-                    await previewCssDiffs(
-                        plan.cssCleanups.map(c => ({
-                            fileRel: c.fileRel,
-                            before: c.before,
-                            after: c.after,
-                            targetUri: vscode.Uri.file(c.absPath)
-                        }))
-                    );
-                    const go = await vscode.window.showInformationMessage(
-                        'Записать CSS-правки на диск?',
-                        'Записать CSS',
-                        'Пропустить CSS'
-                    );
-                    writeCss = go === 'Записать CSS';
-                } else if (seeCss === 'Без CSS' || seeCss === undefined) {
-                    writeCss = false;
-                }
-            }
-
-            if (writeCss) {
-                for (const c of plan.cssCleanups) {
-                    fs.writeFileSync(c.absPath, c.after, 'utf8');
-                }
-            }
-
-            const liveDoc = await vscode.workspace.openTextDocument(editor.document.uri);
-            const fullRange = new vscode.Range(
-                liveDoc.positionAt(0),
-                liveDoc.positionAt(liveDoc.getText().length)
-            );
-            const we = new vscode.WorkspaceEdit();
-            we.replace(liveDoc.uri, fullRange, proposed);
-            const ok = await vscode.workspace.applyEdit(we);
-            if (!ok) {
-                vscode.window.showErrorMessage('Adway AI: правка HTML не применилась');
-                return;
-            }
-            await vscode.window.showTextDocument(liveDoc, { preview: false, preserveFocus: false });
-
-            let note =
-                action === 'replace'
-                    ? `секция заменена на бесплатный плеер (${detected.source})`
-                    : `секция удалена (${detected.source})`;
-            if (writeCss) {
-                note += `; CSS обновлён (${plan.cssCleanups.length})`;
-            }
-
-            if (action === 'replace' && htmlDir) {
-                const afterDoc = await vscode.workspace.openTextDocument(editor.document.uri);
-                await afterDoc.save();
-                const after = afterDoc.getText();
-                const result = setupAdwayVideoPlayer(after, htmlDir, {
-                    writeAssets: true,
-                    cleanup: false
-                });
-                if (result.html !== after) {
-                    const range2 = new vscode.Range(
-                        afterDoc.positionAt(0),
-                        afterDoc.positionAt(after.length)
-                    );
-                    const we2 = new vscode.WorkspaceEdit();
-                    we2.replace(afterDoc.uri, range2, result.html);
-                    await vscode.workspace.applyEdit(we2);
-                    const saved = await vscode.workspace.openTextDocument(editor.document.uri);
-                    await saved.save();
-                    await vscode.window.showTextDocument(saved, { preview: false });
-                }
-                if (result.created.length || result.notes.length) {
-                    note += `; assets: ${(result.created.length ? result.created : result.notes)
-                        .slice(0, 4)
-                        .join(', ')}`;
-                }
-            }
-
-            await diagnosticsProvider.updateDiagnostics(
-                await vscode.workspace.openTextDocument(editor.document.uri)
-            );
-            vscode.window.showInformationMessage(`Adway AI: ${note}`);
+        vscode.commands.registerCommand('adway.importHeaderFooter', () => {
+            openHeaderFooterImportPanel(context);
         }),
         vscode.commands.registerCommand('adway.insertVideoBlock', async () => {
             const editor = vscode.window.activeTextEditor;
@@ -868,14 +642,16 @@ export function activate(context: vscode.ExtensionContext) {
                 removePictureSource: config.get<boolean>('cleanup.removePictureSource', true),
                 normalizeHrefs: true,
                 removeComments: false,
-                moveLinksToHead: true
+                moveLinksToHead: true,
+                fixDtimeDates: true
             });
 
             if (
                 result.removedTargets === 0 &&
                 result.flattenedPictures === 0 &&
                 result.replacedHrefs === 0 &&
-                result.movedLinks === 0
+                result.movedLinks === 0 &&
+                result.fixedDtimeDates === 0
             ) {
                 vscode.window.showInformationMessage('Adway: нечего чистить');
                 return;
@@ -907,7 +683,43 @@ export function activate(context: vscode.ExtensionContext) {
             if (result.movedLinks) {
                 parts.push(`link→head: ${result.movedLinks}`);
             }
+            if (result.fixedDtimeDates) {
+                parts.push(`дата→dtime: ${result.fixedDtimeDates}`);
+            }
             vscode.window.showInformationMessage(`Adway: почищено (${parts.join(', ')})`);
+        }),
+        vscode.commands.registerCommand('adway.fixDtimeDates', async (ctx?: unknown) => {
+            const editor = await getHtmlEditorForFix(ctx);
+            if (!editor) {
+                vscode.window.showErrorMessage('Откройте HTML файл');
+                return;
+            }
+            const html = editor.document.getText();
+            const { html: next, fixed, datesRemoved, scriptsInserted } = fixDtimeDates(html);
+            if (fixed === 0) {
+                vscode.window.showInformationMessage(
+                    'Adway: дат текстом для замены на dtime_nums не найдено'
+                );
+                return;
+            }
+            const fullRange = new vscode.Range(
+                editor.document.positionAt(0),
+                editor.document.positionAt(html.length)
+            );
+            const ok = await editor.edit(eb => eb.replace(fullRange, next));
+            if (!ok) {
+                vscode.window.showErrorMessage('Adway: не удалось поправить dtime_nums');
+                return;
+            }
+            await diagnosticsProvider.updateDiagnostics(editor.document);
+            vscode.window.showInformationMessage(
+                `Adway: убрано дат текстом: ${datesRemoved}` +
+                    (scriptsInserted ? `, вставлено dtime_nums: ${scriptsInserted}` : '')
+            );
+        }),
+        // старое имя команды — тот же фикс
+        vscode.commands.registerCommand('adway.removeDtimeDates', async (ctx?: unknown) => {
+            await vscode.commands.executeCommand('adway.fixDtimeDates', ctx);
         }),
         vscode.commands.registerCommand('adway.moveLinksToHead', async (ctx?: unknown) => {
             const editor = await getHtmlEditorForFix(ctx);

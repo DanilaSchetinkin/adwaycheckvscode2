@@ -7,8 +7,8 @@ export class AdwayStatusBar {
 
     constructor() {
         this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
-        this.item.command = 'adway.focusResultsTree';
-        this.item.tooltip = 'Adway Checker — клик: панель результатов';
+        this.item.command = 'adway.showCommandMenu';
+        this.item.tooltip = 'Adway Checker — клик: меню команд';
         this.item.text = 'Adway: —';
         this.item.show();
     }
@@ -23,15 +23,19 @@ export class AdwayStatusBar {
 
     refreshForActiveEditor() {
         const editor = vscode.window.activeTextEditor;
-        if (!editor || editor.document.languageId !== 'html') {
-            this.item.hide();
+        this.item.show();
+
+        if (!editor || (editor.document.languageId !== 'html' && !/\.html?$/i.test(editor.document.fileName))) {
+            this.item.text = '$(menu) Adway';
+            this.item.backgroundColor = undefined;
+            this.item.tooltip = 'Adway — клик: меню команд (Ctrl+Alt+M)';
             return;
         }
 
-        this.item.show();
+        this.item.tooltip = 'Adway Checker — клик: меню команд (Ctrl+Alt+M)';
         const stats = this.lastByUri.get(editor.document.uri.toString());
         if (!stats) {
-            this.item.text = 'Adway: …';
+            this.item.text = '$(menu) Adway: …';
             this.item.backgroundColor = undefined;
             return;
         }
@@ -50,7 +54,7 @@ export class AdwayStatusBar {
             parts.push(`${stats.warnings} предупр.`);
         }
 
-        this.item.text = `$(warning) Adway: ${parts.join(', ')}`;
+        this.item.text = `$(menu) Adway: ${parts.join(', ')}`;
         this.item.backgroundColor =
             stats.errors > 0
                 ? new vscode.ThemeColor('statusBarItem.errorBackground')

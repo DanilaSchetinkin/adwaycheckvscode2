@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { findMissingLocalPaths } from './filePaths';
 import { findExtensionlessAssets } from './extensionlessAssets';
-import { countLinksOutsideHead } from './cleanup';
+import { countLinksOutsideHead, findDtimeDateBlocks } from './cleanup';
 import { checkScriptAssets } from './scriptAssets';
 import { detectVideoLandingIssues } from './videoPlayer';
 import { readSheetsConfig, validateSidCountry } from './sheets';
@@ -1278,6 +1278,21 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
                     `⚠️ Найдено <span class="value-highlight">${outside}</span> тег(ов) &lt;link&gt; вне &lt;head&gt; — перенесите в head`,
                     html,
                     '<link'
+                );
+            }
+        }
+
+        {
+            const dtimeBlocks = findDtimeDateBlocks(html);
+            const withDate = dtimeBlocks.filter(b => b.hasDate);
+            if (withDate.length > 0) {
+                const first = withDate[0].text.replace(/\s+/g, ' ').slice(0, 80);
+                push(
+                    results,
+                    'warning',
+                    `⚠️ После dtime_nums осталась дата текстом (<span class="value-highlight">${withDate.length}</span>) — оставьте скрипт, уберите хардкод вроде 07.08.2026. Пример: <span class="value-highlight">${escapeHtml(first)}</span>`,
+                    html,
+                    'dtime_nums'
                 );
             }
         }

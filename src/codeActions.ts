@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { findFormRanges } from './checker';
-import { cleanupLanding, flattenPictureSources, removeHtmlComments, removeTargetAttributes } from './cleanup';
+import { cleanupLanding, flattenPictureSources, fixDtimeDates, removeHtmlComments, removeTargetAttributes } from './cleanup';
 import { AdwayDiagnosticCodes } from './diagnostics';
 import { findMissingLocalPaths, fixCssLocalPaths } from './filePaths';
 import { normalizeAnchorHrefs } from './normalizeHrefs';
@@ -37,7 +37,9 @@ export type FixId =
     | 'flattenPicture'
     | 'cleanupLanding'
     | 'fixLocalPath'
-    | 'removeComments';
+    | 'removeComments'
+    | 'fixDtimeDates'
+    | 'removeDtimeDates';
 
 const REQUIRED_HIDDEN: Array<{ name: string; snippet: string }> = [
     { name: 'fbpx', snippet: '<input type="hidden" name="fbpx" value="{fbpx}">' },
@@ -632,6 +634,14 @@ export function buildFixEdit(
             }
             return replaceFullDocument(document, next);
         }
+        case 'fixDtimeDates':
+        case 'removeDtimeDates': {
+            const { html: next, fixed } = fixDtimeDates(document.getText());
+            if (fixed === 0) {
+                return null;
+            }
+            return replaceFullDocument(document, next);
+        }
         case 'cleanupLanding': {
             const config = vscode.workspace.getConfiguration('adway');
             const result = cleanupLanding(document.getText(), {
@@ -639,13 +649,15 @@ export function buildFixEdit(
                 removePictureSource: config.get<boolean>('cleanup.removePictureSource', true),
                 normalizeHrefs: true,
                 removeComments: false,
-                moveLinksToHead: true
+                moveLinksToHead: true,
+                fixDtimeDates: true
             });
             if (
                 result.removedTargets === 0 &&
                 result.flattenedPictures === 0 &&
                 result.replacedHrefs === 0 &&
-                result.movedLinks === 0
+                result.movedLinks === 0 &&
+                result.fixedDtimeDates === 0
             ) {
                 return null;
             }
@@ -929,6 +941,20 @@ export class AdwayCodeActionProvider implements vscode.CodeActionProvider {
                         title: 'Установить видео-плеер (бесплатный)'
                     };
                     actions.push(setup);
+                    break;
+                }
+                case AdwayDiagnosticCodes.dtimeDate: {
+                    const rm = new vscode.CodeAction(
+                        'Adway: dtime_nums — убрать дату текстом',
+                        vscode.CodeActionKind.QuickFix
+                    );
+                    rm.diagnostics = [diagnostic];
+                    rm.isPreferred = true;
+                    rm.command = {
+                        command: 'adway.fixDtimeDates',
+                        title: 'Убрать дату текстом'
+                    };
+                    actions.push(rm);
                     break;
                 }
                 case AdwayDiagnosticCodes.externalImage: {

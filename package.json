@@ -25,6 +25,11 @@
         "icon": "$(search)"
       },
       {
+        "command": "adway.showCommandMenu",
+        "title": "Adway: Меню команд",
+        "icon": "$(menu)"
+      },
+      {
         "command": "adway.fixWizard",
         "title": "Adway: Мастер правок (Compare по ошибкам)",
         "icon": "$(diff)"
@@ -195,19 +200,9 @@
         "icon": "$(device-camera-video)"
       },
       {
-        "command": "adway.aiCheck",
-        "title": "Adway: AI — проверить Ollama",
-        "icon": "$(server)"
-      },
-      {
-        "command": "adway.aiChat",
-        "title": "Adway: AI Chat (Ollama)",
-        "icon": "$(comment-discussion)"
-      },
-      {
-        "command": "adway.aiRemoveOldPlayer",
-        "title": "Adway: AI — убрать старый плеер",
-        "icon": "$(sparkle)"
+        "command": "adway.importHeaderFooter",
+        "title": "Adway: Шапка / подвал по ссылке",
+        "icon": "$(window)"
       },
       {
         "command": "adway.insertVideoBlock",
@@ -228,6 +223,16 @@
         "command": "adway.removeComments",
         "title": "Adway: Удалить HTML-комментарии",
         "icon": "$(commentary)"
+      },
+      {
+        "command": "adway.fixDtimeDates",
+        "title": "Adway: dtime_nums — убрать дату текстом",
+        "icon": "$(calendar)"
+      },
+      {
+        "command": "adway.removeDtimeDates",
+        "title": "Adway: dtime_nums — убрать дату текстом (alias)",
+        "icon": "$(calendar)"
       },
       {
         "command": "adway.downloadExternalImages",
@@ -251,6 +256,11 @@
     },
     "views": {
       "adway": [
+        {
+          "id": "adwayCommands",
+          "name": "Команды",
+          "visibility": "visible"
+        },
         {
           "id": "adwayResults",
           "name": "Результаты"
@@ -334,32 +344,6 @@
           "type": "boolean",
           "default": true,
           "description": "Предупреждать о пустых, дублирующихся и возможно неиспользуемых функциях в <script>"
-        },
-        "adway.ai.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Включить команды локального ИИ (Ollama)"
-        },
-        "adway.ai.host": {
-          "type": "string",
-          "default": "http://127.0.0.1:11434",
-          "description": "URL Ollama (локально)"
-        },
-        "adway.ai.model": {
-          "type": "string",
-          "default": "qwen2.5-coder:3b",
-          "description": "Модель Ollama. На ~4 GB VRAM: qwen2.5-coder:3b (или 1.5b). На ~8 GB: qwen2.5-coder:7b"
-        },
-        "adway.ai.timeoutMs": {
-          "type": "number",
-          "default": 120000,
-          "minimum": 5000,
-          "description": "Таймаут запроса к Ollama (мс)"
-        },
-        "adway.templatesPath": {
-          "type": "string",
-          "default": "",
-          "description": "Папка своих шаблонов для ИИ (например шаблоны или C:\\\\path\\\\шаблоны). Пусто = искать ./шаблоны или ./templates в корне workspace. Подпапки: «бесплатный плеер», «платный плеер», «лэнд»."
         }
       }
     },
@@ -368,6 +352,11 @@
         "command": "adway.checkLanding",
         "key": "ctrl+alt+a",
         "mac": "cmd+alt+a"
+      },
+      {
+        "command": "adway.showCommandMenu",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m"
       },
       {
         "command": "adway.cleanupLanding",
@@ -578,6 +567,10 @@
       ],
       "editor/context": [
         {
+          "command": "adway.showCommandMenu",
+          "group": "adway@0"
+        },
+        {
           "command": "adway.checkLanding",
           "group": "adway@1"
         },
@@ -670,6 +663,10 @@
           "group": "3_markup@5"
         },
         {
+          "command": "adway.fixDtimeDates",
+          "group": "3_markup@5.5"
+        },
+        {
           "command": "adway.downloadExternalImages",
           "group": "3_markup@6"
         },
@@ -686,16 +683,8 @@
           "group": "3_markup@9"
         },
         {
-          "command": "adway.aiRemoveOldPlayer",
+          "command": "adway.importHeaderFooter",
           "group": "3_markup@10"
-        },
-        {
-          "command": "adway.aiChat",
-          "group": "3_markup@10.5"
-        },
-        {
-          "command": "adway.aiCheck",
-          "group": "3_markup@11"
         },
         {
           "command": "adway.connectScriptFile",

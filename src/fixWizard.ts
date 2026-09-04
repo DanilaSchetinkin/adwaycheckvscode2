@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { previewCssDiffs, previewDiffAndChoose } from './ai/changePreview';
+import { previewCssDiffs, previewDiffAndChoose } from './changePreview';
 import { CheckResult, LandingChecker, stripHtml } from './checker';
 import { buildFixEdit, FixId } from './codeActions';
 import { moveLinksToHead } from './cleanup';

@@ -11,6 +11,10 @@ export type CleanupOptions = {
     removeComments?: boolean;
     /** Перенести <link> из body (и вне head) в </head> */
     moveLinksToHead?: boolean;
+    /** dtime_nums оставить/вставить, дату текстом убрать */
+    fixDtimeDates?: boolean;
+    /** @deprecated = fixDtimeDates */
+    removeDtimeDates?: boolean;
 };
 
 export type CleanupResult = {
@@ -20,6 +24,10 @@ export type CleanupResult = {
     replacedHrefs: number;
     removedComments: number;
     movedLinks: number;
+    /** Сколько дат текстом убрано / заменено на dtime_nums */
+    fixedDtimeDates: number;
+    /** @deprecated alias */
+    removedDtimeDates: number;
 };
 
 /** Удаляет атрибут target="…" / target='…' со всех тегов. */
@@ -66,6 +74,164 @@ export function removeHtmlComments(html: string): { html: string; removed: numbe
         next = next.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
     }
     return { html: next, removed };
+}
+
+/** Дата вида 7.8.2026 / 07.08.2026 */
+const HARDCODED_DATE = /^\d{1,2}\.\d{1,2}\.\d{4}/;
+const HARDCODED_DATE_GLOBAL = /\d{1,2}\.\d{1,2}\.\d{4}/g;
+
+/** Стандартный вызов Adway (динамическая дата). */
+export const DTIME_SCRIPT = '<script>dtime_nums(-8, true)</script>';
+
+export type DtimeDateBlock = {
+    start: number;
+    end: number;
+    text: string;
+    hasDate: boolean;
+    /** Только тег <script>…</script> без хвоста-даты */
+    scriptHtml: string;
+};
+
+/**
+ * Блоки <script>…dtime_nums(…)</script> и примыкающая дата (та же / следующая строка).
+ * Примеры:
+ *   <script>dtime_nums(-8, true)</script>07.08.2026
+ *   <script>dtime_nums(-8, true)</script>\n07.08.2026
+ */
+export function findDtimeDateBlocks(html: string): DtimeDateBlock[] {
+    const out: DtimeDateBlock[] = [];
+    const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = scriptRe.exec(html)) !== null) {
+        const body = m[2] || '';
+        if (!/dtime_nums\s*\(/i.test(body)) {
+            continue;
+        }
+        // не трогаем внешние <script src="…">
+        if (/\bsrc\s*=/i.test(m[1] || '')) {
+            continue;
+        }
+        const scriptHtml = m[0];
+        let end = m.index + m[0].length;
+        let hasDate = false;
+        const after = html.slice(end);
+        const ws = after.match(/^[\s\u00a0]*/);
+        const wsLen = ws ? ws[0].length : 0;
+        const dateMatch = after.slice(wsLen).match(HARDCODED_DATE);
+        if (dateMatch) {
+            end += wsLen + dateMatch[0].length;
+            hasDate = true;
+            const tail = html.slice(end).match(/^[ \t]+(?=\r?\n|$)/);
+            if (tail) {
+                end += tail[0].length;
+            }
+        }
+        out.push({
+            start: m.index,
+            end,
+            text: html.slice(m.index, end),
+            hasDate,
+            scriptHtml
+        });
+    }
+    return out;
+}
+
+/**
+ * Нужное поведение Adway:
+ * - скрипт dtime_nums ОСТАВИТЬ / ВСТАВИТЬ
+ * - дату текстом (07.08.2026) УДАЛИТЬ
+ *
+ * 1) `<script>dtime_nums(…)</script>07.08.2026` → оставить только script
+ * 2) голая дата `07.08.2026` в тексте (не в теге/атрибуте) → заменить на dtime_nums
+ */
+export function fixDtimeDates(html: string): {
+    html: string;
+    /** Сколько правок (дат убрано / заменено) */
+    fixed: number;
+    datesRemoved: number;
+    scriptsInserted: number;
+} {
+    let next = html;
+    let datesRemoved = 0;
+    let scriptsInserted = 0;
+
+    // 1) у dtime_nums срезать только хвост-дату
+    const blocks = findDtimeDateBlocks(next);
+    for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        if (!b.hasDate) {
+            continue;
+        }
+        next = next.slice(0, b.start) + b.scriptHtml + next.slice(b.end);
+        datesRemoved += 1;
+    }
+
+    // 2) голые даты в тексте → dtime_nums (не трогаем атрибуты, скрипты, стили, комментарии)
+    const protectedRanges = findProtectedRanges(next);
+    const replacements: Array<{ start: number; end: number }> = [];
+    HARDCODED_DATE_GLOBAL.lastIndex = 0;
+    let dm: RegExpExecArray | null;
+    while ((dm = HARDCODED_DATE_GLOBAL.exec(next)) !== null) {
+        const start = dm.index;
+        const end = start + dm[0].length;
+        if (protectedRanges.some(r => start >= r.start && end <= r.end)) {
+            continue;
+        }
+        // уже сразу после dtime_nums — не дублировать (на случай остатков)
+        const before = next.slice(Math.max(0, start - 80), start);
+        if (/dtime_nums\s*\([^)]*\)\s*<\/script>\s*$/i.test(before.replace(/\s+/g, ' '))) {
+            continue;
+        }
+        // не трогать куски внутри URL / длинных чисел
+        const prev = start > 0 ? next[start - 1] : '';
+        const nextCh = end < next.length ? next[end] : '';
+        if (/\d/.test(prev) || /\d/.test(nextCh)) {
+            continue;
+        }
+        replacements.push({ start, end });
+    }
+
+    for (let i = replacements.length - 1; i >= 0; i--) {
+        const r = replacements[i];
+        next = next.slice(0, r.start) + DTIME_SCRIPT + next.slice(r.end);
+        datesRemoved += 1;
+        scriptsInserted += 1;
+    }
+
+    if (datesRemoved || scriptsInserted) {
+        next = next.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+    }
+
+    return {
+        html: next,
+        fixed: datesRemoved,
+        datesRemoved,
+        scriptsInserted
+    };
+}
+
+/** @deprecated используйте fixDtimeDates — больше не удаляет dtime_nums */
+export function removeDtimeDates(html: string): { html: string; removed: number; withDate: number } {
+    const r = fixDtimeDates(html);
+    return { html: r.html, removed: r.fixed, withDate: r.datesRemoved };
+}
+
+function findProtectedRanges(html: string): Array<{ start: number; end: number }> {
+    const ranges: Array<{ start: number; end: number }> = [];
+    const addAll = (re: RegExp) => {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(html)) !== null) {
+            ranges.push({ start: m.index, end: m.index + m[0].length });
+        }
+    };
+    addAll(/<!--[\s\S]*?-->/g);
+    addAll(/<script\b[^>]*>[\s\S]*?<\/script>/gi);
+    addAll(/<style\b[^>]*>[\s\S]*?<\/style>/gi);
+    // целиком открывающие теги с атрибутами (даты в value= не трогаем)
+    addAll(/<[a-zA-Z][^>]*>/g);
+    return ranges;
 }
 
 function findHeadRange(html: string): { start: number; end: number } | null {
@@ -154,8 +320,11 @@ export function cleanupLanding(html: string, options: CleanupOptions = {}): Clea
         removePictureSource = true,
         normalizeHrefs = true,
         removeComments = false,
-        moveLinksToHead: doMoveLinks = true
+        moveLinksToHead: doMoveLinks = true,
+        fixDtimeDates: doFixDtimeOpt,
+        removeDtimeDates: doRemoveDtimeLegacy
     } = options;
+    const doFixDtime = doFixDtimeOpt ?? doRemoveDtimeLegacy ?? true;
 
     let current = html;
     let removedTargets = 0;
@@ -163,6 +332,13 @@ export function cleanupLanding(html: string, options: CleanupOptions = {}): Clea
     let replacedHrefs = 0;
     let removedComments = 0;
     let movedLinks = 0;
+    let fixedDtimeDates = 0;
+
+    if (doFixDtime) {
+        const r = fixDtimeDates(current);
+        current = r.html;
+        fixedDtimeDates = r.fixed;
+    }
 
     if (removeComments) {
         const r = removeHtmlComments(current);
@@ -200,6 +376,8 @@ export function cleanupLanding(html: string, options: CleanupOptions = {}): Clea
         flattenedPictures,
         replacedHrefs,
         removedComments,
-        movedLinks
+        movedLinks,
+        fixedDtimeDates,
+        removedDtimeDates: fixedDtimeDates
     };
 }

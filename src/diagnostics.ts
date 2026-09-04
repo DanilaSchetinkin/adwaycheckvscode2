@@ -35,7 +35,8 @@ export const AdwayDiagnosticCodes = {
     videoCss: 'adway.video.css',
     videoJs: 'adway.video.js',
     videoMediaPath: 'adway.video.mediaPath',
-    videoFormInside: 'adway.video.formInside'
+    videoFormInside: 'adway.video.formInside',
+    dtimeDate: 'adway.dtimeDate'
 } as const;
 
 export type DiagnosticsUpdatedEvent = {
@@ -46,6 +47,9 @@ export type DiagnosticsUpdatedEvent = {
 
 export function detectCode(text: string): string | undefined {
     const t = text.toLowerCase();
+    if (t.includes('dtime_nums') || t.includes('хардкод дат')) {
+        return AdwayDiagnosticCodes.dtimeDate;
+    }
     if (t.includes('скрипт не подключ') || t.includes('не подключён в html')) {
         return AdwayDiagnosticCodes.scriptUnconnected;
     }
@@ -258,6 +262,8 @@ export function getFixesForCode(code: string | undefined): ResultFixAction[] {
         case AdwayDiagnosticCodes.videoMediaPath:
         case AdwayDiagnosticCodes.videoFormInside:
             return [{ label: 'Установить Adway видео-плеер (бесплатный)', command: 'adway.setupVideoPlayer' }];
+        case AdwayDiagnosticCodes.dtimeDate:
+            return [{ label: 'dtime_nums: убрать дату текстом', command: 'adway.fixDtimeDates' }];
         default:
             return [];
     }
