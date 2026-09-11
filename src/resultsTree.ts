@@ -118,6 +118,15 @@ export class AdwayResultsTreeProvider implements vscode.TreeDataProvider<TreeNod
     }
 
     getTreeItem(element: TreeNode): vscode.TreeItem {
+        try {
+            return this.buildTreeItem(element);
+        } catch (e: unknown) {
+            console.error('Adway Checker: дерево результатов', e);
+            return new vscode.TreeItem('Adway: ошибка панели', vscode.TreeItemCollapsibleState.None);
+        }
+    }
+
+    private buildTreeItem(element: TreeNode): vscode.TreeItem {
         if (element.kind === 'empty') {
             const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
             item.iconPath = new vscode.ThemeIcon('info');
@@ -152,6 +161,15 @@ export class AdwayResultsTreeProvider implements vscode.TreeDataProvider<TreeNod
     }
 
     getChildren(element?: TreeNode): TreeNode[] {
+        try {
+            return this.buildChildren(element);
+        } catch (e: unknown) {
+            console.error('Adway Checker: дерево результатов', e);
+            return [{ kind: 'empty', label: 'Adway: ошибка панели' }];
+        }
+    }
+
+    private buildChildren(element?: TreeNode): TreeNode[] {
         const uri = this.currentUri ?? vscode.window.activeTextEditor?.document.uri;
         if (!uri) {
             return [{ kind: 'empty', label: 'Откройте HTML-файл' }];

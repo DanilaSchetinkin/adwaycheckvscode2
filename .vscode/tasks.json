@@ -2,16 +2,52 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "compile",
       "type": "npm",
-      "script": "watch",
-      "problemMatcher": "$tsc-watch",
-      "isBackground": true,
-      "presentation": {
-        "reveal": "never"
-      },
+      "script": "compile",
+      "problemMatcher": "$tsc",
       "group": {
         "kind": "build",
         "isDefault": true
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "watch",
+      "type": "npm",
+      "script": "watch",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "typescript",
+        "source": "ts",
+        "applyTo": "closedDocuments",
+        "fileLocation": "relative",
+        "pattern": {
+          "regexp": "^(?:\\u001b\\[[0-9;]*m)?([^\\s].*)[\\(:](\\d+)[,:](\\d+)(?:\\):\\s+|\\s+-\\s+)(error|warning|info)\\s+TS(\\d+)\\s*:\\s*(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "code": 5,
+          "message": 6
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Starting compilation in watch mode",
+          "endsPattern": "Watching for file changes"
+        }
+      },
+      "presentation": {
+        "reveal": "never"
+      },
+      "options": {
+        "env": {
+          "FORCE_COLOR": "0",
+          "NO_COLOR": "1"
+        }
       }
     }
   ]

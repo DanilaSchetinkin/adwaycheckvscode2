@@ -64,7 +64,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 const { runLandingCheck } = require('../out/checker');
-const { buildFixEdit } = require('../out/codeActions');
+const { buildFixEdit, fixOrderFormHtml } = require('../out/codeActions');
 const { JQUERY_SNIPPET } = require('../out/snippetTexts');
 
 function hasError(results, substr) {
@@ -320,6 +320,80 @@ async function main() {
         const resultsAfter = await runLandingCheck(next);
         assert.ok(!hasError(resultsAfter, 'Формы не найден'), 'ошибка отсутствия форм должна уйти');
         assert.ok(!hasError(resultsAfter, 'Форма заказа не найден'), 'ошибка формы заказа должна уйти');
+    });
+
+    console.log('7) Hidden: сразу после <form>, не перед </form>');
+    await check('fixOrderFormHtml вставляет hidden под открывающий тег', async () => {
+        const form = `<form action="/order.php" method="post">
+  <input name="name" required>
+  <input name="phone" required>
+</form>`;
+        const { html: next, changed } = fixOrderFormHtml(form);
+        assert.ok(changed, 'форма должна измениться');
+        const inner = next.match(/<form\b[^>]*>([\s\S]*)<\/form>/i)[1];
+        const hiddenIdx = inner.indexOf('type="hidden"');
+        const nameIdx = inner.indexOf('name="name"');
+        assert.ok(hiddenIdx >= 0, 'должны появиться hidden');
+        assert.ok(hiddenIdx < nameIdx, 'hidden должны быть до полей name/phone, сразу после <form>');
+        assert.ok(!/required>[\s\S]*type="hidden"[\s\S]*<\/form>/i.test(next) || hiddenIdx < nameIdx, 'hidden не в конце формы');
+    });
+
+    await check('buildFixEdit(hidden) вставляет после <form>', async () => {
+        const html = `<!DOCTYPE html>
+<html>
+<body>
+<form action="/order.php" method="post">
+  <input name="name" required>
+  <input name="phone" required>
+</form>
+</body>
+</html>`;
+        const lines = html.split('\n');
+        const doc = {
+            uri: vscodeMock.Uri.file('/tmp/hidden.html'),
+            getText: () => html,
+            lineCount: lines.length,
+            lineAt: (i) => ({
+                text: lines[i] || '',
+                range: {
+                    start: { line: i, character: 0 },
+                    end: { line: i, character: (lines[i] || '').length }
+                }
+            }),
+            positionAt: (offset) => {
+                const before = html.slice(0, offset);
+                const parts = before.split('\n');
+                return { line: parts.length - 1, character: parts[parts.length - 1].length };
+            },
+            offsetAt: (pos) => {
+                let off = 0;
+                for (let i = 0; i < pos.line; i++) {
+                    off += (lines[i] || '').length + 1;
+                }
+                return off + pos.character;
+            }
+        };
+        const edit = buildFixEdit(doc, 'hidden', 3);
+        assert.ok(edit, 'edit hidden должен быть');
+        const next = applyEdit(html, edit);
+        const inner = next.match(/<form\b[^>]*>([\s\S]*)<\/form>/i)[1];
+        const hiddenIdx = inner.indexOf('type="hidden"');
+        const nameIdx = inner.indexOf('name="name"');
+        assert.ok(hiddenIdx >= 0 && hiddenIdx < nameIdx, 'hidden сразу после <form>, до name');
+    });
+
+    console.log('8) Checker: битый HTML не должен бросать');
+    await check('jsdom переживает сломанную разметку', async () => {
+        const messy = `<!DOCTYPE html><html><head></head><body>
+<form><input name="name"><div><span><p>unclosed
+<style>body{background:url(https://evil.example/x.png)}</style>
+<script>const u = "https://cdn.example/a.js"; /* https://skip.me/x */</script>
+<img src="https://img.example/a.jpg">
+<a href="https://x.com">x</a>
+</body>`;
+        const results = await runLandingCheck(messy);
+        assert.ok(Array.isArray(results) && results.length > 0, 'должны быть результаты');
+        assert.ok(!results.some(r => String(r.text).includes('Ошибка при разборе HTML')), 'разбор не должен падать');
     });
 
     console.log('');

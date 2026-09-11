@@ -13,8 +13,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:html",
-    "onCommand:adway.initProjectStructure"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -250,7 +249,7 @@
         {
           "id": "adway",
           "title": "Adway",
-          "icon": "$(checklist)"
+          "icon": "icons/adway.svg"
         }
       ]
     },

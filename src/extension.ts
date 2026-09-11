@@ -44,6 +44,17 @@ let resultsPanelSource: { document: vscode.TextDocument; column: vscode.ViewColu
 let resultsPanelResults: CheckResult[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
+    try {
+        activateAdway(context);
+    } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error('Adway Checker: ошибка активации', e);
+        void vscode.window.showErrorMessage(`Adway Checker не запустился: ${msg}`);
+        // не пробрасываем — иначе Extension Host падает при любой ошибке activate
+    }
+}
+
+function activateAdway(context: vscode.ExtensionContext) {
     console.log('Adway Checker активирован');
 
     initSheets(context);
@@ -57,12 +68,20 @@ export function activate(context: vscode.ExtensionContext) {
         diagnosticsProvider,
         statusBar,
         diagnosticsProvider.onDidUpdate(event => {
-            statusBar.onDiagnosticsUpdated(event);
-            resultsTree.onDiagnosticsUpdated(event);
+            try {
+                statusBar.onDiagnosticsUpdated(event);
+                resultsTree.onDiagnosticsUpdated(event);
+            } catch (e: unknown) {
+                console.error('Adway Checker: ошибка обновления UI', e);
+            }
         }),
         vscode.window.onDidChangeActiveTextEditor(editor => {
-            statusBar.refreshForActiveEditor();
-            resultsTree.onActiveEditorChanged(editor);
+            try {
+                statusBar.refreshForActiveEditor();
+                resultsTree.onActiveEditorChanged(editor);
+            } catch (e: unknown) {
+                console.error('Adway Checker: ошибка смены редактора', e);
+            }
         }),
         vscode.commands.registerCommand(
             'adway.openTreeIssue',
@@ -212,10 +231,21 @@ export function activate(context: vscode.ExtensionContext) {
                 preserveFocus: false
             });
 
-            await diagnosticsProvider.updateDiagnostics(editor.document);
+            try {
+                await diagnosticsProvider.updateDiagnostics(editor.document);
+            } catch (e: unknown) {
+                console.error('Adway Checker: диагностика перед панелью', e);
+            }
 
             const checker = new LandingChecker(editor.document);
-            const results = await checker.check();
+            let results: CheckResult[];
+            try {
+                results = await checker.check();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Adway: проверка упала — ${msg}`);
+                return;
+            }
 
             resultsPanelSource = {
                 document: editor.document,
@@ -229,16 +259,29 @@ export function activate(context: vscode.ExtensionContext) {
             ];
 
             if (!resultsPanel) {
-                resultsPanel = vscode.window.createWebviewPanel(
-                    'adwayResults',
-                    'Результаты проверки Adway',
-                    vscode.ViewColumn.Beside,
-                    {
-                        enableScripts: true,
-                        enableCommandUris: ['adway.resultsGoTo'],
-                        retainContextWhenHidden: true
-                    }
-                );
+                try {
+                    resultsPanel = vscode.window.createWebviewPanel(
+                        'adwayResults',
+                        'Результаты проверки Adway',
+                        vscode.ViewColumn.Beside,
+                        {
+                            enableScripts: true,
+                            enableCommandUris: ['adway.resultsGoTo'],
+                            retainContextWhenHidden: true
+                        }
+                    );
+                } catch {
+                    resultsPanel = vscode.window.createWebviewPanel(
+                        'adwayResults',
+                        'Результаты проверки Adway',
+                        vscode.ViewColumn.Beside,
+                        {
+                            enableScripts: true,
+                            enableCommandUris: true,
+                            retainContextWhenHidden: true
+                        }
+                    );
+                }
 
                 resultsPanel.onDidDispose(() => {
                     resultsPanel = undefined;
@@ -248,7 +291,13 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             resultsPanel.title = `Результаты Adway — ${path.basename(editor.document.fileName)}`;
-            resultsPanel.webview.html = generateResultsHtml(resultsPanelResults);
+            try {
+                resultsPanel.webview.html = generateResultsHtml(resultsPanelResults);
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Adway: не удалось показать результаты — ${msg}`);
+                return;
+            }
             resultsPanel.reveal(vscode.ViewColumn.Beside, true);
         }
     );
@@ -1180,26 +1229,39 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.workspace.onDidOpenTextDocument(doc => {
-            if (doc.languageId === 'html') {
-                void diagnosticsProvider.updateDiagnostics(doc);
+            try {
+                if (doc.languageId === 'html') {
+                    // не сразу: openTextDocument во время open ломает Extension Host
+                    diagnosticsProvider.scheduleUpdate(doc, 250);
+                }
+            } catch (e: unknown) {
+                console.error('Adway Checker: ошибка при открытии файла', e);
             }
         }),
         vscode.workspace.onDidChangeTextDocument(event => {
-            if (event.document.languageId === 'html') {
-                diagnosticsProvider.scheduleUpdate(event.document);
+            try {
+                if (event.document.languageId === 'html') {
+                    diagnosticsProvider.scheduleUpdate(event.document);
+                }
+            } catch (e: unknown) {
+                console.error('Adway Checker: ошибка автопроверки', e);
             }
         }),
         vscode.workspace.onDidSaveTextDocument(doc => {
-            if (doc.languageId === 'html') {
-                void diagnosticsProvider.updateDiagnostics(doc);
+            try {
+                if (doc.languageId === 'html') {
+                    void diagnosticsProvider.updateDiagnostics(doc);
+                }
+            } catch (e: unknown) {
+                console.error('Adway Checker: ошибка при сохранении', e);
             }
         })
     );
 
-    // Проверить уже открытые HTML
+    // Проверить уже открытые HTML (с задержкой, без параллельного jsdom)
     for (const doc of vscode.workspace.textDocuments) {
         if (doc.languageId === 'html') {
-            void diagnosticsProvider.updateDiagnostics(doc);
+            diagnosticsProvider.scheduleUpdate(doc, 300);
         }
     }
 }

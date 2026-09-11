@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { LandingChecker, stripHtml } from './checker';
@@ -274,6 +275,25 @@ export function getFixesForMessage(message: string): ResultFixAction[] {
     return getFixesForCode(detectCode(stripHtml(message).replace(/[✅❌⚠️]/g, '').trim()));
 }
 
+const MAX_HTML_CHARS = 4 * 1024 * 1024;
+
+function isCheckableHtml(document: vscode.TextDocument): boolean {
+    if (document.languageId !== 'html' && !/\.html?$/i.test(document.fileName)) {
+        return false;
+    }
+    if (document.uri.scheme !== 'file' && document.uri.scheme !== 'untitled') {
+        return false;
+    }
+    return !document.isClosed;
+}
+
+function lineExtent(text: string, line: number): { safeLine: number; endCol: number } {
+    const lines = text.split(/\r?\n/);
+    const maxLine = Math.max(0, lines.length - 1);
+    const safeLine = Math.min(Math.max(0, Number(line) || 0), maxLine);
+    return { safeLine, endCol: (lines[safeLine] || '').length };
+}
+
 export class AdwayDiagnostics {
     private diagnosticCollection: vscode.DiagnosticCollection;
     private timers = new Map<string, NodeJS.Timeout>();
@@ -282,14 +302,18 @@ export class AdwayDiagnostics {
     private generation = 0;
     /** HTML → доп. URI (CSS и т.п.), куда писали диагностики этой проверки */
     private relatedUris = new Map<string, vscode.Uri[]>();
+    /** Одна проверка за раз — иначе jsdom + обход диска валят Extension Host */
+    private queue: Promise<void> = Promise.resolve();
+    private latest = new Map<string, vscode.TextDocument>();
+    private cssTextCache = new Map<string, { mtime: number; text: string }>();
 
     constructor() {
         this.diagnosticCollection = vscode.languages.createDiagnosticCollection('adway');
     }
 
-    /** Отложенное обновление — для набора текста */
+    /** Отложенное обновление — для набора текста и открытия файла */
     scheduleUpdate(document: vscode.TextDocument, delayMs?: number) {
-        if (document.languageId !== 'html') {
+        if (!isCheckableHtml(document)) {
             return;
         }
         const config = vscode.workspace.getConfiguration('adway');
@@ -304,13 +328,82 @@ export class AdwayDiagnostics {
         const timer = setTimeout(() => {
             this.timers.delete(key);
             void this.updateDiagnostics(document);
-        }, delay);
+        }, Math.max(0, delay));
         this.timers.set(key, timer);
     }
 
-    /** Сразу (open / save / ручная команда) */
+    /** Сразу (save / ручная команда) или в очереди (open) */
     async updateDiagnostics(document: vscode.TextDocument) {
-        if (document.languageId !== 'html') {
+        if (!isCheckableHtml(document)) {
+            return;
+        }
+        const key = document.uri.toString();
+        this.latest.set(key, document);
+        const job = this.queue.then(() => this.drain(key));
+        this.queue = job.then(
+            () => undefined,
+            () => undefined
+        );
+        try {
+            await job;
+        } catch (e: unknown) {
+            console.error('Adway Checker: диагностика', e);
+        }
+    }
+
+    private async drain(key: string): Promise<void> {
+        const document = this.latest.get(key);
+        if (!document) {
+            return;
+        }
+        this.latest.delete(key);
+        await this.runDiagnosticsOnce(document);
+    }
+
+    private readCssText(absPath: string): string | undefined {
+        try {
+            const st = fs.statSync(absPath);
+            const cached = this.cssTextCache.get(absPath);
+            if (cached && cached.mtime === st.mtimeMs) {
+                return cached.text;
+            }
+            const text = fs.readFileSync(absPath, 'utf8');
+            this.cssTextCache.set(absPath, { mtime: st.mtimeMs, text });
+            if (this.cssTextCache.size > 40) {
+                const first = this.cssTextCache.keys().next().value;
+                if (first) {
+                    this.cssTextCache.delete(first);
+                }
+            }
+            return text;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async runDiagnosticsOnce(document: vscode.TextDocument) {
+        try {
+            await this.runDiagnosticsOnceUnsafe(document);
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('Adway Checker: диагностика упала', e);
+            try {
+                this.diagnosticCollection.set(document.uri, [
+                    new vscode.Diagnostic(
+                        new vscode.Range(0, 0, 0, 0),
+                        `Adway: ошибка проверки — ${msg}`,
+                        vscode.DiagnosticSeverity.Error
+                    )
+                ]);
+                this._onDidUpdate.fire({ uri: document.uri, errorCount: 1, warningCount: 0 });
+            } catch {
+                // ignore
+            }
+        }
+    }
+
+    private async runDiagnosticsOnceUnsafe(document: vscode.TextDocument) {
+        if (document.isClosed || !isCheckableHtml(document)) {
             return;
         }
 
@@ -330,16 +423,43 @@ export class AdwayDiagnostics {
             return;
         }
 
+        if (document.getText().length > MAX_HTML_CHARS) {
+            this.diagnosticCollection.set(document.uri, [
+                new vscode.Diagnostic(
+                    new vscode.Range(0, 0, 0, 0),
+                    'Adway: файл слишком большой для автопроверки — откройте команду «Проверить лендинг»',
+                    vscode.DiagnosticSeverity.Warning
+                )
+            ]);
+            this._onDidUpdate.fire({ uri: document.uri, errorCount: 0, warningCount: 1 });
+            return;
+        }
+
         const gen = ++this.generation;
-        const checker = new LandingChecker(document);
-        const results = await checker.check();
+        let results;
+        try {
+            results = await new LandingChecker(document).check();
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error('Adway Checker: диагностика упала', e);
+            this.diagnosticCollection.set(document.uri, [
+                new vscode.Diagnostic(
+                    new vscode.Range(0, 0, 0, 0),
+                    `Adway: ошибка проверки — ${msg}`,
+                    vscode.DiagnosticSeverity.Error
+                )
+            ]);
+            this._onDidUpdate.fire({ uri: document.uri, errorCount: 1, warningCount: 0 });
+            return;
+        }
 
         // Устаревший результат после более нового запуска
         if (gen !== this.generation) {
             return;
         }
 
-        const htmlDir = path.dirname(document.uri.fsPath);
+        const htmlDir =
+            document.uri.scheme === 'file' ? path.dirname(document.uri.fsPath) : undefined;
         const byUri = new Map<string, { uri: vscode.Uri; diags: vscode.Diagnostic[] }>();
         const ensure = (uri: vscode.Uri) => {
             const k = uri.toString();
@@ -373,26 +493,20 @@ export class AdwayDiagnostics {
 
             const message = stripHtml(result.text).replace(/[✅❌⚠️]/g, '').trim();
             let targetUri = document.uri;
-            let targetDoc: vscode.TextDocument = document;
+            let extent = lineExtent(document.getText(), result.line ?? 0);
 
-            if (result.file) {
+            if (result.file && htmlDir) {
                 const abs = path.resolve(htmlDir, result.file);
-                const cssUri = vscode.Uri.file(abs);
-                try {
-                    targetDoc = await vscode.workspace.openTextDocument(cssUri);
-                    targetUri = cssUri;
-                } catch {
-                    targetUri = document.uri;
-                    targetDoc = document;
+                const cssText = this.readCssText(abs);
+                if (cssText !== undefined) {
+                    targetUri = vscode.Uri.file(abs);
+                    extent = lineExtent(cssText, result.line ?? 0);
                 }
             }
 
-            const line = result.line ?? 0;
-            const maxLine = Math.max(0, targetDoc.lineCount - 1);
-            const safeLine = Math.min(Math.max(0, line), maxLine);
             const range = new vscode.Range(
-                new vscode.Position(safeLine, 0),
-                new vscode.Position(safeLine, targetDoc.lineAt(safeLine).text.length)
+                new vscode.Position(extent.safeLine, 0),
+                new vscode.Position(extent.safeLine, extent.endCol)
             );
 
             const diagnostic = new vscode.Diagnostic(range, message, severity);

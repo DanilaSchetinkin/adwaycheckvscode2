@@ -1,4 +1,4 @@
-import { JSDOM } from 'jsdom';
+import { JSDOM, VirtualConsole } from 'jsdom';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -111,6 +111,32 @@ function isUrlExcluded(url: string): boolean {
     );
 }
 
+function createOffsetToLine(html: string): (offset: number) => number {
+    const starts: number[] = [0];
+    for (let i = 0; i < html.length; i++) {
+        if (html.charCodeAt(i) === 10) {
+            starts.push(i + 1);
+        }
+    }
+    return (offset: number) => {
+        const o = Math.max(0, Math.min(offset, html.length));
+        let lo = 0;
+        let hi = starts.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (starts[mid] <= o) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return lo;
+    };
+}
+
+/** На время одной проверки — O(log n) вместо split на каждый findLine */
+let offsetToLine: ((offset: number) => number) | undefined;
+
 function findLine(
     html: string,
     search: string,
@@ -123,18 +149,20 @@ function findLine(
     const limit = endIndex ?? html.length;
     const slice = html.slice(0, limit);
     const idx = slice.indexOf(search, fromIndex);
-    if (idx === -1) {
+    let found = idx;
+    if (found === -1) {
         const lower = slice.toLowerCase();
-        const idx2 = lower.indexOf(search.toLowerCase(), fromIndex);
-        if (idx2 === -1 || idx2 >= limit) {
+        found = lower.indexOf(search.toLowerCase(), fromIndex);
+        if (found === -1 || found >= limit) {
             return undefined;
         }
-        return html.substring(0, idx2).split('\n').length - 1;
-    }
-    if (idx >= limit) {
+    } else if (found >= limit) {
         return undefined;
     }
-    return html.substring(0, idx).split('\n').length - 1;
+    if (offsetToLine) {
+        return offsetToLine(found);
+    }
+    return html.substring(0, found).split('\n').length - 1;
 }
 
 export type FormRange = { start: number; end: number };
@@ -158,6 +186,9 @@ export function findFormRanges(html: string): FormRange[] {
 }
 
 function lineAtOffset(html: string, offset: number): number {
+    if (offsetToLine) {
+        return offsetToLine(Math.max(0, offset));
+    }
     return html.substring(0, Math.max(0, offset)).split('\n').length - 1;
 }
 
@@ -321,9 +352,13 @@ function extractUrlsFromCss(content: string): string[] {
         }
     }
 
-    const directUrlPattern = /(?<!['"`])(https?:[^\s<>"'`)]+)/gi;
+    const directUrlPattern = /https?:[^\s<>"'`)]+/gi;
     while ((match = directUrlPattern.exec(content)) !== null) {
-        const url = match[1];
+        const url = match[0];
+        const prev = match.index > 0 ? content[match.index - 1] : '';
+        if (prev === "'" || prev === '"' || prev === '`') {
+            continue;
+        }
         if (!url.startsWith('data:') && !urls.includes(url)) {
             urls.push(url);
         }
@@ -383,9 +418,13 @@ function extractUrlsFromJs(content: string, whitelist: string[]): string[] {
         }
     }
 
-    const directUrlPattern = /(?<!['"`])(https?:[^\s<>"'`)\]]+)/gi;
+    const directUrlPattern = /https?:[^\s<>"'`)\]]+/gi;
     while ((match = directUrlPattern.exec(content)) !== null) {
-        const url = match[1];
+        const url = match[0];
+        const prev = match.index > 0 ? content[match.index - 1] : '';
+        if (prev === "'" || prev === '"' || prev === '`') {
+            continue;
+        }
         if (!isUrlExcluded(url) && !url.startsWith('data:') && !url.includes('${') && !urls.includes(url)) {
             urls.push(url);
         }
@@ -516,11 +555,9 @@ function checkOffer(document: Document, results: CheckResult[], html: string): v
             const range = formRanges[index];
             const from = range?.start ?? 0;
             const to = range?.end ?? html.length;
-            // Ошибки «отсутствует поле» → строка </form> (куда вставляют hidden)
-            const missingLine = range
-                ? lineAtOffset(html, Math.max(range.start, range.end - '</form>'.length))
-                : undefined;
+            // Ошибки «отсутствует поле» → строка <form> (куда вставляют hidden)
             const formOpenLine = range ? lineAtOffset(html, range.start) : undefined;
+            const missingLine = formOpenLine;
 
             if (hiddenInputs.length === 6) {
                 formsWithHiddenInputs++;
@@ -1019,13 +1056,37 @@ async function checkExternalResources(
     }
 }
 
+function createLandingDom(html: string): JSDOM {
+    const virtualConsole = new VirtualConsole();
+    virtualConsole.on('jsdomError', () => undefined);
+    virtualConsole.on('error', () => undefined);
+    virtualConsole.on('warn', () => undefined);
+    // Всегда http:// — file:// с Windows-путём роняет jsdom в Extension Host
+    return new JSDOM(html, {
+        contentType: 'text/html',
+        url: 'http://localhost/',
+        virtualConsole,
+        pretendToBeVisual: false
+    });
+}
+
 /**
  * Полная проверка лендинга (паритет с Chrome checker.js) через jsdom.
  */
 export async function runLandingCheck(html: string, options: CheckerOptions = {}): Promise<CheckResult[]> {
-    const baseUrl = options.baseUrl || 'http://localhost/';
-    const dom = new JSDOM(html, { url: baseUrl, contentType: 'text/html' });
-    const { document, window } = dom.window;
+    const baseUrl = 'http://localhost/';
+    offsetToLine = createOffsetToLine(html);
+    let document: Document;
+    let closer: { close: () => void } | undefined;
+    try {
+        const dom = createLandingDom(html);
+        document = dom.window.document;
+        closer = dom.window;
+    } catch (e: unknown) {
+        offsetToLine = undefined;
+        const msg = e instanceof Error ? e.message : String(e);
+        return [{ success: false, text: `❌ Ошибка при разборе HTML: ${msg}` }];
+    }
 
     const baseWhitelist = options.whitelist?.length ? options.whitelist : DEFAULT_LINK_WHITELIST;
     const whitelist = buildWhitelist(document, baseWhitelist);
@@ -1059,7 +1120,7 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
         }
 
         const allScripts = Array.from(document.querySelectorAll('script'));
-        const bodyScripts = allScripts.filter(script => document.body.contains(script));
+        const bodyScripts = allScripts.filter(script => document.body?.contains(script));
 
         let foundLazy = false;
         let foundScroll = false;
@@ -1428,7 +1489,12 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
         const msg = e instanceof Error ? e.message : String(e);
         push(results, false, `❌ Ошибка при проверке: ${msg}`);
     } finally {
-        window.close();
+        offsetToLine = undefined;
+        try {
+            closer?.close();
+        } catch {
+            // jsdom close() иногда бросает на битом HTML
+        }
     }
 
     return results;
@@ -1448,7 +1514,7 @@ export class LandingChecker {
             document.uri.scheme === 'file' ? path.dirname(document.uri.fsPath) : undefined;
         this.options = {
             whitelist,
-            baseUrl: document.uri.scheme === 'file' ? document.uri.toString() : 'http://localhost/',
+            baseUrl: 'http://localhost/',
             validateSidCountry: sheets.enabled ? validateSidCountry : undefined,
             htmlDir,
             checkLocalPaths: config.get<boolean>('checkLocalPaths', true),

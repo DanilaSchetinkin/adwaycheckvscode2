@@ -137,13 +137,7 @@ export function fixOrderFormHtml(formHtml: string): { html: string; changed: boo
     }
 
     if (missingSnippets.length > 0) {
-        const closeIdx = body.toLowerCase().lastIndexOf('</form>');
-        const block = missingSnippets.join('\n') + '\n';
-        if (closeIdx === -1) {
-            body = body + '\n' + block;
-        } else {
-            body = body.slice(0, closeIdx) + block + body.slice(closeIdx);
-        }
+        body = prependInsideForm(body, missingSnippets);
     }
 
     const next = before + openTag + body;
@@ -287,8 +281,23 @@ function fixActionOnLine(document: vscode.TextDocument, line: number): vscode.Wo
     return edit;
 }
 
-/** Вставить 6 hidden перед </form>, ближайшим к line (или первая форма). */
-function insertHiddenBeforeFormClose(document: vscode.TextDocument, line: number): vscode.WorkspaceEdit | null {
+function formIndent(afterOpen: string): string {
+    const m = afterOpen.match(/^\r?\n([ \t]*)/);
+    return m && m[1].length > 0 ? m[1] : '  ';
+}
+
+/** Вставить блок сразу после открывающего <form>, сохранив отступ. */
+function prependInsideForm(body: string, snippets: string[]): string {
+    const indent = formIndent(body);
+    const block = snippets.map(s => indent + s).join('\n');
+    if (/^\r?\n/.test(body)) {
+        return body.replace(/^\r?\n/, `\n${block}\n`);
+    }
+    return `\n${block}\n` + body;
+}
+
+/** Вставить 6 hidden сразу после <form>, ближайшего к line (или первая форма). */
+function insertHiddenAfterFormOpen(document: vscode.TextDocument, line: number): vscode.WorkspaceEdit | null {
     const html = document.getText();
     const ranges = findFormRanges(html);
     if (ranges.length === 0) {
@@ -304,13 +313,17 @@ function insertHiddenBeforeFormClose(document: vscode.TextDocument, line: number
     }
 
     const formHtml = html.slice(range.start, range.end);
-    const closeIdx = formHtml.toLowerCase().lastIndexOf('</form>');
-    if (closeIdx === -1) {
+    const openMatch = formHtml.match(/<form\b[^>]*>/i);
+    if (!openMatch || openMatch.index === undefined) {
         return insertAtLine(document, line, HIDDEN_INPUTS);
     }
-    const insertAt = range.start + closeIdx;
+    const afterOpen = openMatch.index + openMatch[0].length;
+    const rest = formHtml.slice(afterOpen);
+    const indent = formIndent(rest);
+    const block = HIDDEN_INPUTS.trim().split('\n').map(s => indent + s).join('\n');
+    const chunk = `\n${block}` + (/^\r?\n/.test(rest) ? '' : '\n');
     const edit = new vscode.WorkspaceEdit();
-    edit.insert(document.uri, document.positionAt(insertAt), HIDDEN_INPUTS + '\n');
+    edit.insert(document.uri, document.positionAt(range.start + afterOpen), chunk);
     return edit;
 }
 
@@ -552,7 +565,7 @@ export function buildFixEdit(
                 insertAtLine(document, line, VALIDATION_SCRIPT)
             );
         case 'hidden':
-            return insertHiddenBeforeFormClose(document, line);
+            return insertHiddenAfterFormOpen(document, line);
         case 'fixForm':
             return fixOrderFormInPlace(document, line);
         case 'fixLocalPath':
@@ -708,6 +721,18 @@ export class AdwayCodeActionProvider implements vscode.CodeActionProvider {
     provideCodeActions(
         document: vscode.TextDocument,
         _range: vscode.Range | vscode.Selection,
+        context: vscode.CodeActionContext
+    ): vscode.CodeAction[] {
+        try {
+            return this.buildCodeActions(document, context);
+        } catch (e: unknown) {
+            console.error('Adway Checker: code actions', e);
+            return [];
+        }
+    }
+
+    private buildCodeActions(
+        document: vscode.TextDocument,
         context: vscode.CodeActionContext
     ): vscode.CodeAction[] {
         const actions: vscode.CodeAction[] = [];

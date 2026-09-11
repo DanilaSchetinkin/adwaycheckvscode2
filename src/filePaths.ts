@@ -34,6 +34,85 @@ const SKIP_WALK_DIRS = new Set([
     'other'
 ]);
 
+type AssetIndex = {
+    byBase: Map<string, string[]>;
+    byStem: Map<string, string[]>;
+};
+
+let assetIndexCache: { dir: string; at: number; index: AssetIndex } | undefined;
+const ASSET_INDEX_TTL_MS = 2500;
+const ASSET_INDEX_MAX_FILES = 4000;
+
+function addIndexPath(map: Map<string, string[]>, key: string, relPath: string) {
+    const list = map.get(key);
+    if (list) {
+        list.push(relPath);
+    } else {
+        map.set(key, [relPath]);
+    }
+}
+
+function buildAssetIndex(htmlDir: string, maxDepth: number): AssetIndex {
+    const byBase = new Map<string, string[]>();
+    const byStem = new Map<string, string[]>();
+    let files = 0;
+    const walk = (dir: string, rel: string, depth: number) => {
+        if (depth > maxDepth || files >= ASSET_INDEX_MAX_FILES) {
+            return;
+        }
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const entry of entries) {
+            if (files >= ASSET_INDEX_MAX_FILES) {
+                return;
+            }
+            if (entry.name.startsWith('.')) {
+                continue;
+            }
+            if (entry.isDirectory()) {
+                if (SKIP_WALK_DIRS.has(entry.name)) {
+                    continue;
+                }
+                walk(
+                    path.join(dir, entry.name),
+                    rel ? `${rel}/${entry.name}` : entry.name,
+                    depth + 1
+                );
+                continue;
+            }
+            files += 1;
+            const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+            const nameLower = entry.name.toLowerCase();
+            addIndexPath(byBase, nameLower, relPath);
+            const ext = path.extname(entry.name);
+            const stem = (ext ? entry.name.slice(0, -ext.length) : entry.name).toLowerCase();
+            if (stem) {
+                addIndexPath(byStem, stem, relPath);
+            }
+        }
+    };
+    walk(htmlDir, '', 0);
+    return { byBase, byStem };
+}
+
+function getAssetIndex(htmlDir: string, maxDepth: number): AssetIndex {
+    const now = Date.now();
+    if (
+        assetIndexCache &&
+        assetIndexCache.dir === htmlDir &&
+        now - assetIndexCache.at < ASSET_INDEX_TTL_MS
+    ) {
+        return assetIndexCache.index;
+    }
+    const index = buildAssetIndex(htmlDir, maxDepth);
+    assetIndexCache = { dir: htmlDir, at: now, index };
+    return index;
+}
+
 function isRemoteOrSpecial(url: string): boolean {
     const u = url.trim();
     if (!u || u === '#' || u.startsWith('#')) {
@@ -166,50 +245,9 @@ export function findAssetByBasename(
         }
     }
 
-    // 3) рекурсивный обход: точное имя + совпадение по stem (uuid → uuid.png)
-    const foundExact: string[] = [];
-    const foundStem: string[] = [];
-    const walk = (dir: string, rel: string, depth: number) => {
-        if (depth > maxDepth) {
-            return;
-        }
-        let entries: fs.Dirent[];
-        try {
-            entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-            return;
-        }
-        for (const entry of entries) {
-            if (entry.name.startsWith('.')) {
-                continue;
-            }
-            if (entry.isDirectory()) {
-                // other/ не предлагаем как целевой путь, но ищем файлы в images/…
-                if (SKIP_WALK_DIRS.has(entry.name)) {
-                    continue;
-                }
-                walk(
-                    path.join(dir, entry.name),
-                    rel ? `${rel}/${entry.name}` : entry.name,
-                    depth + 1
-                );
-                continue;
-            }
-            const nameLower = entry.name.toLowerCase();
-            const relPath = rel ? `${rel}/${entry.name}` : entry.name;
-            if (nameLower === baseLower) {
-                foundExact.push(relPath);
-                continue;
-            }
-            if (stem) {
-                const entryStem = path.basename(entry.name, path.extname(entry.name)).toLowerCase();
-                if (entryStem === stem) {
-                    foundStem.push(relPath);
-                }
-            }
-        }
-    };
-    walk(htmlDir, '', 0);
+    const index = getAssetIndex(htmlDir, maxDepth);
+    const foundExact = [...(index.byBase.get(baseLower) || [])];
+    const foundStem = stem ? [...(index.byStem.get(stem) || [])] : [];
 
     const rank = (p: string) => {
         const n = p.replace(/\\/g, '/').toLowerCase();
