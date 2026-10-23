@@ -1,4 +1,4 @@
-import type { CheckResult } from './checker';
+import type { CheckResult } from './checkTypes';
 
 type PushFn = (
     results: CheckResult[],

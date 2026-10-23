@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { LandingChecker, stripHtml } from './checker';
+import { stripHtml } from './checkTypes';
 
 export const AdwayDiagnosticCodes = {
     jquery: 'adway.jquery',
@@ -284,7 +284,16 @@ function isCheckableHtml(document: vscode.TextDocument): boolean {
     if (document.uri.scheme !== 'file' && document.uri.scheme !== 'untitled') {
         return false;
     }
-    return !document.isClosed;
+    if (document.isClosed) {
+        return false;
+    }
+    if (document.uri.scheme === 'file') {
+        const n = document.uri.fsPath.replace(/\\/g, '/').toLowerCase();
+        if (n.includes('/node_modules/') || n.includes('/.git/') || /\/out\//.test(n)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 function lineExtent(text: string, line: number): { safeLine: number; endCol: number } {
@@ -306,19 +315,39 @@ export class AdwayDiagnostics {
     private queue: Promise<void> = Promise.resolve();
     private latest = new Map<string, vscode.TextDocument>();
     private cssTextCache = new Map<string, { mtime: number; text: string }>();
+    /** Пока false — игнор open/change (F5 ещё поднимает окно) */
+    private acceptEvents = false;
+    private lastChecked = new Map<string, number>();
 
     constructor() {
         this.diagnosticCollection = vscode.languages.createDiagnosticCollection('adway');
     }
 
+    /** Разрешить автопроверку после того, как окно F5 поднялось */
+    beginAcceptingEvents() {
+        this.acceptEvents = true;
+    }
+
+    /** Пауза при смене папки / перезапуске окна F5 */
+    pauseAcceptingEvents() {
+        this.acceptEvents = false;
+        for (const timer of this.timers.values()) {
+            clearTimeout(timer);
+        }
+        this.timers.clear();
+    }
+
     /** Отложенное обновление — для набора текста и открытия файла */
     scheduleUpdate(document: vscode.TextDocument, delayMs?: number) {
-        if (!isCheckableHtml(document)) {
+        if (!this.acceptEvents || !isCheckableHtml(document)) {
+            return;
+        }
+        const key = document.uri.toString();
+        if (this.lastChecked.get(key) === document.version) {
             return;
         }
         const config = vscode.workspace.getConfiguration('adway');
         const delay = delayMs ?? config.get<number>('diagnosticsDebounceMs', 400);
-        const key = document.uri.toString();
 
         const existing = this.timers.get(key);
         if (existing) {
@@ -419,6 +448,7 @@ export class AdwayDiagnostics {
 
         if (!enabled) {
             this.diagnosticCollection.delete(document.uri);
+            this.lastChecked.set(htmlKey, document.version);
             this._onDidUpdate.fire({ uri: document.uri, errorCount: 0, warningCount: 0 });
             return;
         }
@@ -431,6 +461,7 @@ export class AdwayDiagnostics {
                     vscode.DiagnosticSeverity.Warning
                 )
             ]);
+            this.lastChecked.set(htmlKey, document.version);
             this._onDidUpdate.fire({ uri: document.uri, errorCount: 0, warningCount: 1 });
             return;
         }
@@ -438,6 +469,7 @@ export class AdwayDiagnostics {
         const gen = ++this.generation;
         let results;
         try {
+            const { LandingChecker } = await import('./checkHost');
             results = await new LandingChecker(document).check();
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -526,6 +558,7 @@ export class AdwayDiagnostics {
             }
         }
         this.relatedUris.set(htmlKey, related);
+        this.lastChecked.set(htmlKey, document.version);
         this._onDidUpdate.fire({ uri: document.uri, errorCount, warningCount });
     }
 

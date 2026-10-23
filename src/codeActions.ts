@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { findFormRanges } from './checker';
+import { findFormRanges } from './checkTypes';
 import { cleanupLanding, flattenPictureSources, fixDtimeDates, removeHtmlComments, removeTargetAttributes } from './cleanup';
 import { AdwayDiagnosticCodes } from './diagnostics';
 import { findMissingLocalPaths, fixCssLocalPaths } from './filePaths';

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { CheckResult, LandingChecker, stripHtml } from './checker';
+import { CheckResult, stripHtml } from './checkTypes';
 import { AdwayCodeActionProvider, buildFixEdit, FixId, fixAllLocalPathsWithCss } from './codeActions';
 import { cleanupLanding, moveLinksToHead, fixDtimeDates, removeHtmlComments } from './cleanup';
 import {
@@ -43,8 +43,21 @@ let resultsPanel: vscode.WebviewPanel | undefined;
 let resultsPanelSource: { document: vscode.TextDocument; column: vscode.ViewColumn } | undefined;
 let resultsPanelResults: CheckResult[] = [];
 
+let rejectionGuardInstalled = false;
+
+function installRejectionGuard() {
+    if (rejectionGuardInstalled) {
+        return;
+    }
+    rejectionGuardInstalled = true;
+    process.on('unhandledRejection', reason => {
+        console.error('Adway Checker: unhandledRejection', reason);
+    });
+}
+
 export function activate(context: vscode.ExtensionContext) {
     try {
+        installRejectionGuard();
         activateAdway(context);
     } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -79,6 +92,9 @@ function activateAdway(context: vscode.ExtensionContext) {
             try {
                 statusBar.refreshForActiveEditor();
                 resultsTree.onActiveEditorChanged(editor);
+                if (editor) {
+                    diagnosticsProvider.scheduleUpdate(editor.document, 400);
+                }
             } catch (e: unknown) {
                 console.error('Adway Checker: ошибка смены редактора', e);
             }
@@ -237,6 +253,7 @@ function activateAdway(context: vscode.ExtensionContext) {
                 console.error('Adway Checker: диагностика перед панелью', e);
             }
 
+            const { LandingChecker } = await import('./checkHost');
             const checker = new LandingChecker(editor.document);
             let results: CheckResult[];
             try {
@@ -1227,12 +1244,17 @@ function activateAdway(context: vscode.ExtensionContext) {
         })
     );
 
+    // F5 / смена проекта: не трогать HTML, пока окно и вкладки поднялись
+    let startup = setTimeout(() => {
+        diagnosticsProvider.beginAcceptingEvents();
+    }, 10000);
+
     context.subscriptions.push(
         vscode.workspace.onDidOpenTextDocument(doc => {
             try {
                 if (doc.languageId === 'html') {
                     // не сразу: openTextDocument во время open ломает Extension Host
-                    diagnosticsProvider.scheduleUpdate(doc, 250);
+                    diagnosticsProvider.scheduleUpdate(doc, 1500);
                 }
             } catch (e: unknown) {
                 console.error('Adway Checker: ошибка при открытии файла', e);
@@ -1255,15 +1277,17 @@ function activateAdway(context: vscode.ExtensionContext) {
             } catch (e: unknown) {
                 console.error('Adway Checker: ошибка при сохранении', e);
             }
-        })
+        }),
+        // File → Open Folder в окне F5 перезапускает EH — пауза автопроверки
+        vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            diagnosticsProvider.pauseAcceptingEvents();
+            clearTimeout(startup);
+            startup = setTimeout(() => {
+                diagnosticsProvider.beginAcceptingEvents();
+            }, 10000);
+        }),
+        { dispose: () => clearTimeout(startup) }
     );
-
-    // Проверить уже открытые HTML (с задержкой, без параллельного jsdom)
-    for (const doc of vscode.workspace.textDocuments) {
-        if (doc.languageId === 'html') {
-            diagnosticsProvider.scheduleUpdate(doc, 300);
-        }
-    }
 }
 
 async function revealResultsLine(

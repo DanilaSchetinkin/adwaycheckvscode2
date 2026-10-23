@@ -3,7 +3,6 @@ import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
 import { URL } from 'url';
-import { JSDOM } from 'jsdom';
 
 export type ImportParts = {
     header: boolean;
@@ -553,7 +552,9 @@ export async function importHeaderFooterFromUrl(
     }
 
     const pageHtml = await fetchText(url);
-    const dom = new JSDOM(pageHtml, { url });
+    const { JSDOM } = require('jsdom') as typeof import('jsdom');
+    const dom = new JSDOM(pageHtml, { url, pretendToBeVisual: false });
+    try {
     const doc = dom.window.document;
 
     const headerEl = parts.header ? pickFirst(doc, HEADER_SELECTORS) : null;
@@ -661,4 +662,11 @@ export async function importHeaderFooterFromUrl(
     );
 
     return { html: nextHtml, created, notes, warnings };
+    } finally {
+        try {
+            dom.window.close();
+        } catch {
+            /* jsdom close() на битом HTML */
+        }
+    }
 }

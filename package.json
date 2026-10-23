@@ -13,7 +13,9 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onLanguage:html",
+    "onView:adwayCommands",
+    "onView:adwayResults"
   ],
   "main": "./out/extension.js",
   "contributes": {

@@ -1,0 +1,4 @@
+{
+  "debug.javascript.breakOnLoadStrategy": "never",
+  "debug.javascript.autoAttachFilter": "disabled"
+}

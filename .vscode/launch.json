@@ -7,13 +7,41 @@
       "request": "launch",
       "runtimeExecutable": "${execPath}",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--disable-workspace-trust"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/out/**/*.js"
+      ],
+      "preLaunchTask": "compile",
+      "noDebug": true,
+      "env": {
+        "NODE_OPTIONS": "--dns-result-order=ipv4first"
+      }
+    },
+    {
+      "name": "Run Extension (с отладчиком)",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--disable-workspace-trust"
       ],
       "outFiles": [
         "${workspaceFolder}/out/**/*.js"
       ],
       "sourceMaps": true,
-      "preLaunchTask": "compile"
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/**",
+        "!**/node_modules/**"
+      ],
+      "stopOnEntry": false,
+      "timeout": 60000,
+      "preLaunchTask": "compile",
+      "env": {
+        "NODE_OPTIONS": "--dns-result-order=ipv4first"
+      }
     }
   ]
 }

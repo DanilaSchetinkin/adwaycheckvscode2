@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { stripHtml } from './checker';
+import { stripHtml } from './checkTypes';
 import { AdwayDiagnostics, DiagnosticsUpdatedEvent } from './diagnostics';
 
 export type ResultGroupId = 'main' | 'forms' | 'sid' | 'links' | 'scripts';

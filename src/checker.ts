@@ -1,68 +1,41 @@
-import { JSDOM, VirtualConsole } from 'jsdom';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as vscode from 'vscode';
 import { findMissingLocalPaths } from './filePaths';
 import { findExtensionlessAssets } from './extensionlessAssets';
 import { countLinksOutsideHead, findDtimeDateBlocks } from './cleanup';
 import { checkScriptAssets } from './scriptAssets';
 import { detectVideoLandingIssues } from './videoPlayer';
-import { readSheetsConfig, validateSidCountry } from './sheets';
 import { checkUnusedScripts } from './unusedScripts';
 import { collectLocalCssExternalAssets } from './downloadAssets';
+import {
+    CHECK_SEVERITY_ERROR,
+    CHECK_SEVERITY_WARNING,
+    DEFAULT_LINK_WHITELIST,
+    findFormRanges,
+    type CheckResult,
+    type CheckSuccess,
+    type CheckerOptions,
+    type SidValidationResult
+} from './checkTypes';
 
-/** true = ok, false = error, 'warning' = warning (как в Chrome) */
-export type CheckSuccess = boolean | 'warning';
-
-export interface CheckResult {
-    success: CheckSuccess;
-    text: string;
-    /** 0-based line for Problems / jump */
-    line?: number;
-    /**
-     * Относительный путь от папки HTML (напр. css/style.css).
-     * Если задан — переход из панели открывает этот файл, а не HTML.
-     */
-    file?: string;
-    severity?: vscode.DiagnosticSeverity;
-}
-
-export interface SidValidationResult {
-    ok: boolean;
-    error?: string;
-    expectedCountry?: string;
-}
-
-export interface CheckerOptions {
-    whitelist?: string[];
-    /** Если не задан — SID/Country через Sheets пропускается (шаг 2) */
-    validateSidCountry?: (sid: string, country: string) => Promise<SidValidationResult>;
-    /** Если не задан — глубокий разбор содержимого внешних CSS/JS пропускается */
-    fetchResource?: (url: string) => Promise<string | null>;
-    baseUrl?: string;
-    /** Папка HTML-файла для проверки локальных путей */
-    htmlDir?: string;
-    /** Проверять существование локальных src/href/srcset */
-    checkLocalPaths?: boolean;
-    /** Варнинг на <picture> с <source> */
-    warnPictureSource?: boolean;
-    /** Эвристика неиспользуемых/пустых/дублирующихся скриптов */
-    checkUnusedScripts?: boolean;
-}
+export {
+    CHECK_SEVERITY_ERROR,
+    CHECK_SEVERITY_WARNING,
+    DEFAULT_LINK_WHITELIST,
+    findFormRanges,
+    stripHtml
+} from './checkTypes';
+export type {
+    CheckResult,
+    CheckSuccess,
+    CheckerOptions,
+    FormRange,
+    SidValidationResult
+} from './checkTypes';
 
 const ALLOWED_ACTIONS = ['/order.php', '/fb-order.php', '/submit.php', '/process/order.php'];
 
 const URL_EXCLUDED_PATTERNS = ['{offer}', 'javascript:'];
-
-const DEFAULT_LINK_WHITELIST = [
-    'static.joxi.pro',
-    'static.cloudflareinsights.com',
-    'cloudflareinsights.com',
-    'github.com',
-    'www.w3.org',
-    'converteai.net',
-    'vturb.com'
-];
 
 const VTURB_ADDITIONAL_WHITELIST = [
     'sentry.io',
@@ -84,10 +57,6 @@ function escapeHtml(text: string): string {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
-}
-
-export function stripHtml(text: string): string {
-    return text.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
 }
 
 function removeComments(code: string): string {
@@ -165,26 +134,6 @@ function findLine(
     return html.substring(0, found).split('\n').length - 1;
 }
 
-export type FormRange = { start: number; end: number };
-
-/** Диапазоны <form>…</form> в исходном HTML (по порядку, с учётом вложенности). */
-export function findFormRanges(html: string): FormRange[] {
-    const ranges: FormRange[] = [];
-    const re = /<\/?form\b[^>]*>/gi;
-    const stack: number[] = [];
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(html)) !== null) {
-        const tag = match[0];
-        if (/^<form\b/i.test(tag)) {
-            stack.push(match.index);
-        } else if (stack.length > 0) {
-            const start = stack.pop()!;
-            ranges.push({ start, end: match.index + tag.length });
-        }
-    }
-    return ranges;
-}
-
 function lineAtOffset(html: string, offset: number): number {
     if (offsetToLine) {
         return offsetToLine(Math.max(0, offset));
@@ -205,11 +154,11 @@ function push(
         html && search
             ? findLine(html, search, fromIndex ?? 0, endIndex)
             : undefined;
-    let severity: vscode.DiagnosticSeverity | undefined;
+    let severity: number | undefined;
     if (success === false) {
-        severity = vscode.DiagnosticSeverity.Error;
+        severity = CHECK_SEVERITY_ERROR;
     } else if (success === 'warning') {
-        severity = vscode.DiagnosticSeverity.Warning;
+        severity = CHECK_SEVERITY_WARNING;
     }
     results.push({ success, text, line, severity });
 }
@@ -221,11 +170,11 @@ function pushAtLine(
     line?: number,
     file?: string
 ): void {
-    let severity: vscode.DiagnosticSeverity | undefined;
+    let severity: number | undefined;
     if (success === false) {
-        severity = vscode.DiagnosticSeverity.Error;
+        severity = CHECK_SEVERITY_ERROR;
     } else if (success === 'warning') {
-        severity = vscode.DiagnosticSeverity.Warning;
+        severity = CHECK_SEVERITY_WARNING;
     }
     results.push({ success, text, line, file, severity });
 }
@@ -1056,7 +1005,24 @@ async function checkExternalResources(
     }
 }
 
-function createLandingDom(html: string): JSDOM {
+type JsdomModule = typeof import('jsdom');
+let jsdomModule: JsdomModule | undefined;
+
+function loadJsdom(): JsdomModule {
+    if (!jsdomModule) {
+        try {
+            // не import: require('jsdom') в Extension Host на F5 роняет процесс
+            jsdomModule = require('jsdom') as JsdomModule;
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(`jsdom не загрузился: ${msg}`);
+        }
+    }
+    return jsdomModule;
+}
+
+function createLandingDom(html: string): InstanceType<JsdomModule['JSDOM']> {
+    const { JSDOM, VirtualConsole } = loadJsdom();
     const virtualConsole = new VirtualConsole();
     virtualConsole.on('jsdomError', () => undefined);
     virtualConsole.on('error', () => undefined);
@@ -1066,14 +1032,51 @@ function createLandingDom(html: string): JSDOM {
         contentType: 'text/html',
         url: 'http://localhost/',
         virtualConsole,
-        pretendToBeVisual: false
+        pretendToBeVisual: false,
+        runScripts: undefined,
+        resources: undefined
     });
+}
+
+function validateFromSidMap(
+    map: Record<string, string>,
+    sid: string,
+    country: string
+): SidValidationResult {
+    const expectedCountry = map[sid];
+    if (!expectedCountry) {
+        return { ok: false, error: 'sid отсутствует в таблице' };
+    }
+    if (expectedCountry.toUpperCase() !== country.toUpperCase()) {
+        return {
+            ok: false,
+            error: `country должно быть ${expectedCountry}`,
+            expectedCountry
+        };
+    }
+    return { ok: true };
+}
+
+function resolveSidValidator(
+    options: CheckerOptions
+): ((sid: string, country: string) => Promise<SidValidationResult>) | undefined {
+    if (options.validateSidCountry) {
+        return options.validateSidCountry;
+    }
+    const map = options.sidCountryMap;
+    if (!map) {
+        return undefined;
+    }
+    return async (sid, country) => validateFromSidMap(map, sid, country);
 }
 
 /**
  * Полная проверка лендинга (паритет с Chrome checker.js) через jsdom.
  */
 export async function runLandingCheck(html: string, options: CheckerOptions = {}): Promise<CheckResult[]> {
+    // два тика event loop — иначе jsdom стартует в том же кадре, что и F5
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>(resolve => setImmediate(resolve));
     const baseUrl = 'http://localhost/';
     offsetToLine = createOffsetToLine(html);
     let document: Document;
@@ -1453,7 +1456,8 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
             }
         }
 
-        if (!isCCOffer && options.validateSidCountry) {
+        const validateSid = resolveSidValidator(options);
+        if (!isCCOffer && validateSid) {
             const allFormsForSid = Array.from(document.querySelectorAll('form'));
             for (const [index, form] of allFormsForSid.entries()) {
                 const hiddenInputs = form.querySelectorAll('input[type="hidden"]');
@@ -1468,7 +1472,7 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
                 const countryInput = form.querySelector('input[type="hidden"][name="country"]') as HTMLInputElement | null;
                 if (sidInput && countryInput && sidInput.value.trim() && countryInput.value.trim()) {
                     try {
-                        const validation = await options.validateSidCountry(
+                        const validation = await validateSid(
                             sidInput.value.trim(),
                             countryInput.value.trim()
                         );
@@ -1498,33 +1502,4 @@ export async function runLandingCheck(html: string, options: CheckerOptions = {}
     }
 
     return results;
-}
-
-/** Обёртка для VS Code TextDocument — читает буфер как есть, без save(). */
-export class LandingChecker {
-    private htmlContent: string;
-    private options: CheckerOptions;
-
-    constructor(document: vscode.TextDocument, options?: CheckerOptions) {
-        this.htmlContent = document.getText();
-        const config = vscode.workspace.getConfiguration('adway');
-        const whitelist = config.get<string[]>('linkWhitelist', DEFAULT_LINK_WHITELIST);
-        const sheets = readSheetsConfig();
-        const htmlDir =
-            document.uri.scheme === 'file' ? path.dirname(document.uri.fsPath) : undefined;
-        this.options = {
-            whitelist,
-            baseUrl: 'http://localhost/',
-            validateSidCountry: sheets.enabled ? validateSidCountry : undefined,
-            htmlDir,
-            checkLocalPaths: config.get<boolean>('checkLocalPaths', true),
-            warnPictureSource: config.get<boolean>('cleanup.removePictureSource', true),
-            checkUnusedScripts: config.get<boolean>('checkUnusedScripts', true),
-            ...options
-        };
-    }
-
-    async check(): Promise<CheckResult[]> {
-        return runLandingCheck(this.htmlContent, this.options);
-    }
 }
